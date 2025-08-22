@@ -277,8 +277,3 @@
     background: #fff;
     border-right: 4px solid var(--cb-pink);
 }
-
-/* --- Hide Default Elements --- */
-header[data-testid="stHeader"] {display: none;}
-.stDeployButton {display: none;}
-.css-1lsmgbg.e1fqkh3o3 {display: none;}

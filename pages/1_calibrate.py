@@ -359,7 +359,7 @@ def main():
     st.markdown(
         '<div class="main-header" >'
         '<h1>Process Calibrant Data</h1>'
-        '<p>Fit ATDs of calibrants and generate reference files for IMSCal</p>'
+        '<p>Fit ATDs of calibrants and generate reference files for IMSCal<sup>1</sup></p>'
         '</div>',
         unsafe_allow_html=True
     )
@@ -367,11 +367,11 @@ def main():
     # Info card (blue background, blue borders)
     st.markdown("""
     <div class="info-card">
-        <p>Use this page to fit the ATDs of your calibrants from text files or CSV files and generate a reference file for IMSCal and/or a csv file of calibrant measured and literature arrival times. This is designed for use with denatured calibrants, so the fitting only allows for a single peak in each ATD - consider another tool if your ATDs are not gaussian.</p>
-        <p>To start, make a folder for each calibrant you used. You should name these folders according to the table below (or they won't match the bush database file). You can use either:</p>
+        <p>Use this page to fit the ATDs of your calibrants either from text files or CSV files generated using TWIMExtract<sup>2</sup> and generate a reference file for IMSCal<sup>1</sup> and/or a csv file of calibrant measured and literature arrival times. This is designed for use with denatured calibrants, so the fitting only allows for a single peak in each ATD - consider another tool if your ATDs are not gaussian. You will still be able to use subsequent tools.</p>
+        <p>To start, make a folder for each calibrant you used. You should name these folders according to the table below (or they won't match the database file<sup>3</sup>). You can use either:</p>
         <ul>
             <li><strong>Text files (.txt):</strong> Create a text file for each charge state (called 'X.txt' where X is the charge state) and paste the corresponding ATD from MassLynx into each file. Remember to set the x-axis to ms not bins!</li>
-            <li><strong>CSV files (.csv):</strong> From TWIMExtract or similar tools, generate a CSV file for the ATD of each charge state and rename them 'X.csv' where X is the charge state. CSV files can contain comment lines starting with '#' which will be ignored.</li>
+            <li><strong>CSV files (.csv):</strong> From TWIMExtract<sup>2</sup> or similar tools, generate a CSV file for the ATD of each charge state and rename them 'X.csv' where X is the charge state. CSV files can contain comment lines starting with '#' which will be ignored.</li>
         </ul>
         <p>Save these files under their respective protein folder, zip the protein folders together, and upload below.</p>
     </div>
@@ -392,6 +392,15 @@ def main():
         import_tools.clear_cache()
 
     if uploaded_zip_file is None:
+        # Add references section when no file is uploaded
+        st.markdown("""
+        <div class="info-card">
+            <h3>📚 References</h3>
+            <p><sup>1</sup> I. Sergent, A. I. Adjieufack, A. Gaudel-Siri and L. Charles, <em> International Journal of Mass Spectrometry,</em>,2023, 492, 117112.</p>
+            <p><sup>2</sup> S. E. Haynes, D. A. Polasky, S. M. Dixit, J. D. Majmudar, K. Neeson, B. T. Ruotolo and B. R. Martin, <em>Analytical Chemistry</em>, 2017, 89, 5669–5672.</p>
+            <p><sup>3</sup> Bush, M. F., et al. <em>Journal of the American Society for Mass Spectrometry</em>, 2010, 21, 1003-1010.</p>
+        </div>
+        """, unsafe_allow_html=True)
         return
 
     try:
@@ -442,6 +451,16 @@ def main():
         st.markdown('<div class="info-card">', unsafe_allow_html=True)
         FileGenerator.create_download_buttons(combined_results, params)
         st.markdown('</div>', unsafe_allow_html=True)
+
+        # Add references section at the end
+        st.markdown("""
+        <div class="info-card">
+            <h3>📚 References</h3>
+            <p><sup>1</sup> I. Sergent, A. I. Adjieufack, A. Gaudel-Siri and L. Charles, <em> International Journal of Mass Spectrometry,</em>,2023, 492, 117112.</p>
+            <p><sup>2</sup> S. E. Haynes, D. A. Polasky, S. M. Dixit, J. D. Majmudar, K. Neeson, B. T. Ruotolo and B. R. Martin, <em>Analytical Chemistry</em>, 2017, 89, 5669–5672.</p>
+            <p><sup>3</sup> Bush, M. F., et al. <em>Journal of the American Society for Mass Spectrometry</em>, 2010, 21, 1003-1010.</p>
+        </div>
+        """, unsafe_allow_html=True)
 
     except Exception as e:
         st.markdown(

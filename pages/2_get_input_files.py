@@ -40,13 +40,43 @@ class InputProcessor:
             return output_folder, processed_files, failed_files
 
         for filename in os.listdir(sample_folder_path):
-            if filename.endswith('.txt') and filename[0].isdigit():
+            # Check for both .txt and .csv files that start with a digit
+            if (filename.endswith('.txt') or filename.endswith('.csv')) and filename[0].isdigit():
                 file_path = os.path.join(sample_folder_path, filename)
                 try:
-                    data = np.loadtxt(file_path)
+                    # Handle different file formats
+                    if filename.endswith('.csv'):
+                        # Handle CSV format with potential comments
+                        data_rows = []
+                        with open(file_path, 'r') as f:
+                            for line in f:
+                                line = line.strip()
+                                # Skip empty lines and comment lines (starting with #)
+                                if not line or line.startswith('#'):
+                                    continue
+                                # Parse the data line
+                                try:
+                                    values = line.split(',')
+                                    if len(values) >= 2:
+                                        drift_time = float(values[0])
+                                        intensity = float(values[1])
+                                        data_rows.append([drift_time, intensity])
+                                except (ValueError, IndexError):
+                                    continue  # Skip malformed lines
+                        
+                        if not data_rows:
+                            failed_files.append(f"{filename} - No valid data found in CSV file")
+                            continue
+                        
+                        data = np.array(data_rows)
+                    else:
+                        # Handle .txt files with the original method
+                        data = np.loadtxt(file_path)
+                    
                     if data.ndim == 1 or data.shape[1] < 2:
                         failed_files.append(f"{filename} - insufficient data columns")
                         continue
+                    
                     drift_time = data[:, 0]
                     intensity = data[:, 1]
                     if self.params.drift_mode == "Cyclic" and self.params.inject_time is not None:
@@ -56,7 +86,7 @@ class InputProcessor:
                     df = pd.DataFrame({
                         "index": index,
                         "mass": self.params.sample_mass_map[folder_name],
-                        "charge": filename[:-4],
+                        "charge": filename[:-4],  # Remove file extension
                         "intensity": intensity,
                         "drift_time": drift_time
                     })
@@ -109,8 +139,14 @@ class UI:
     def show_info_card():
         st.markdown("""
         <div class="info-card">
-            <p>To use IMSCal, you need a reference file and an input file. The reference file is your calibrant information (if you haven't got this yet, go to 'calibrate'), and the input file is your data to be calibrated. Just as for the calibration, make a folder per sample and within that make a text file for each charge state (called e.g. '1.txt', '2.txt' etc.). Paste the corresponding ATD from MassLynx into each one. Zip the folders together and upload it here.</p>
-            <p><strong>Note:</strong> This step is not doing any fitting! All it does is generates an input for IMSCal, which will then convert ATDs to CCSDs.</p>
+            <p>Use this page to generate input files for IMSCal<sup>1</sup> calibration from your sample data. To use IMSCal, you need a reference file and an input file. The reference file is your calibrant information (if you haven't got this yet, go to 'Process Calibrant Data'), and the input file is your data to be calibrated.</p>
+            <p>Just as for the calibration, make a folder for each sample and within that make a file for each charge state (called e.g. '1.txt', '2.txt', '1.csv', '2.csv' etc.). You can use either:</p>
+            <ul>
+                <li><strong>Text files (.txt):</strong> Create a text file for each charge state (called 'X.txt' where X is the charge state) and paste the corresponding ATD from MassLynx into each file. Remember to set the x-axis to ms not bins!</li>
+                <li><strong>CSV files (.csv):</strong> From TWIMExtract<sup>2</sup> or similar tools, generate a CSV file for the ATD of each charge state and rename them 'X.csv' where X is the charge state. CSV files can contain comment lines starting with '#' which will be ignored.</li>
+            </ul>
+            <p>Save these files under their respective sample folder, zip the folders together, and upload below.</p>
+            <p><strong>Note:</strong> This step is not doing any fitting! All it does is generate an input for IMSCal, which will then convert ATDs to CCSDs.</p>
         </div>
         """, unsafe_allow_html=True)
 
@@ -179,13 +215,20 @@ def main():
     UI.show_main_header()
     UI.show_info_card()
     uploaded_zip_file = UI.get_uploaded_zip()
+    
+    # Clear cache button inside info card for consistent styling
+    if st.button("🧹 Clear Cache & Restart App"):
+        import_tools.clear_cache()
+    
     if uploaded_zip_file is None:
-        return
-
-    # Use myutils.import_tools to handle ZIP extraction
-    try:
-        sample_folders, temp_dir = import_tools.handle_zip_upload(uploaded_zip_file)
-    except Exception as e:
+        # Add references section when no file is uploaded
+        st.markdown("""
+        <div class="info-card">
+            <h3>📚 References</h3>
+            <p><sup>1</sup> I. Sergent, A. I. Adjieufack, A. Gaudel-Siri and L. Charles, <em> International Journal of Mass Spectrometry,</em>,2023, 492, 117112.</p>
+            <p><sup>2</sup> S. E. Haynes, D. A. Polasky, S. M. Dixit, J. D. Majmudar, K. Neeson, B. T. Ruotolo and B. R. Martin, <em>Analytical Chemistry</em>, 2017, 89, 5669–5672.</p>
+        </div>
+        """, unsafe_allow_html=True)
         return
 
     # Use myutils.import_tools to handle ZIP extraction
@@ -212,6 +255,15 @@ def main():
     if sum(len(files) for files in result.processed_files.values()) > 0:
         zip_buffer = OutputGenerator.generate_zip(result.sample_paths)
         UI.show_download_button(zip_buffer)
+    
+    # Add references section at the end
+    st.markdown("""
+    <div class="info-card">
+        <h3>📚 References</h3>
+        <p><sup>1</sup> I. Sergent, A. I. Adjieufack, A. Gaudel-Siri and L. Charles, <em> International Journal of Mass Spectrometry,</em>,2023, 492, 117112.</p>
+        <p><sup>2</sup> S. E. Haynes, D. A. Polasky, S. M. Dixit, J. D. Majmudar, K. Neeson, B. T. Ruotolo and B. R. Martin, <em>Analytical Chemistry</em>, 2017, 89, 5669–5672.</p>
+    </div>
+    """, unsafe_allow_html=True)
 
 if __name__ == "__main__":
     main()

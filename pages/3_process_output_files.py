@@ -86,9 +86,16 @@ class UI:
     def show_info_card():
         st.markdown("""
         <div class="info-card">
-            <p>This step is about finishing off the calibration. For many (most) purposes, it is useless and annoying that I have separated out this final part of the calibration from the generation of the full calibrated dataset, but for situations where you have done multiple experiments on the same protein (e.g. activated ion mobility), it is useful to only have to calibrate once.</p>
-            <p>Here you are generating CCS values for every timepoint in the ATD for all the charge states of the proteins in your folders - if, for example, you have run Protein X at 5 different collision voltages, you only need to calibrate at one collision voltage.</p>
-            <p><strong>Note:</strong> Once you have completed this step, go to 'Process and Plot Data' to finish the job. Again, no fitting is being done here.</p>
+            <p>Use this page to process the output files from IMSCal<sup>1</sup> and generate CCS values for every timepoint in the ATD for all charge states of your proteins. This step completes the calibration process by converting the calibrated drift times to collision cross-sections.</p>
+            <p>This step is particularly useful when you have performed multiple experiments on the same protein (e.g., activated ion mobility experiments at different collision voltages). In such cases, you only need to calibrate once using IMSCal, then use this tool to process all your experimental conditions.</p>
+            <p>To use this tool:</p>
+            <ul>
+                <li>Upload a ZIP file containing folders with your IMSCal output files</li>
+                <li>Each folder should represent a different protein or experimental condition</li>
+                <li>Files should be named <code>output_X.dat</code> where X is the charge state</li>
+                <li>Files must contain a <code>[CALIBRATED DATA]</code> section from IMSCal</li>
+            </ul>
+            <p><strong>Note:</strong> This step does not perform any fitting - it simply extracts and organizes the calibrated data. After completing this step, proceed to 'Get Calibrated Scaled Data' to finish your analysis.</p>
         </div>
         """, unsafe_allow_html=True)
 
@@ -148,7 +155,7 @@ class UI:
                 <li><strong>CCS Std.Dev.:</strong> Standard deviation</li>
                 <li><strong>Intensity:</strong> Intensity value</li>
             </ul>
-            <p><strong>Ready to continue?</strong> Go to 'Process and Plot Data' to finish your analysis.</p>
+            <p><strong>Ready to continue?</strong> Go to 'Get Calibrated Scaled Data' to finish your analysis.</p>
         </div>
         """, unsafe_allow_html=True)
 
@@ -187,8 +194,21 @@ def main():
     styling.load_custom_css()
     UI.show_main_header()
     UI.show_info_card()
+    
+    # Clear cache button inside info card for consistent styling
+    if st.button("🧹 Clear Cache & Restart App"):
+        import_tools.clear_cache()
+    
     uploaded_zip = UI.show_upload_section()
+    
     if not uploaded_zip:
+        # Add references section when no file is uploaded
+        st.markdown("""
+        <div class="info-card">
+            <h3>📚 References</h3>
+            <p><sup>1</sup> I. Sergent, A. I. Adjieufack, A. Gaudel-Siri and L. Charles, <em> International Journal of Mass Spectrometry,</em>,2023, 492, 117112.</p>
+        </div>
+        """, unsafe_allow_html=True)
         return
 
     result = OutputProcessor.extract_protein_data(uploaded_zip)
@@ -210,6 +230,14 @@ def main():
     else:
         UI.show_warning_card()
         UI.show_help_section()
+    
+    # Add references section at the end
+    st.markdown("""
+    <div class="info-card">
+        <h3>📚 References</h3>
+        <p><sup>1</sup> I. Sergent, A. I. Adjieufack, A. Gaudel-Siri and L. Charles, <em> International Journal of Mass Spectrometry,</em>,2023, 492, 117112.</p>
+    </div>
+    """, unsafe_allow_html=True)
 
 if __name__ == "__main__":
     main()

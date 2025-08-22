@@ -10,107 +10,182 @@ from io import BytesIO
 from pathlib import Path
 import matplotlib.pyplot as plt
 from scipy.signal import find_peaks
+from scipy import integrate
+from sklearn.linear_model import LinearRegression
 
 from myutils import styling
 
 PROTON_MASS = 1.007276
 
-def autodetect_peak_and_range(ms_df_window: pd.DataFrame, full_ms_df: pd.DataFrame = None, mz_center: float = None) -> Tuple[float, float]:
-    """Detect peak bounds centered on the charge state m/z rather than highest intensity.
-    If the detected range is wider than the window, use the full spectrum."""
-    y = ms_df_window["Smoothed"].values
-    x = ms_df_window["m/z"].values
+def fit_baseline_and_integrate(x: np.ndarray, y: np.ndarray, integration_range: Tuple[float, float]) -> Tuple[float, np.ndarray]:
+    """
+    Fit a linear baseline and integrate the peak above the baseline.
     
-    # If no center provided, use middle of window
-    if mz_center is None:
-        mz_center = (x[0] + x[-1]) / 2
-    
-    # Find the closest point to the charge state m/z
-    center_idx = np.argmin(np.abs(x - mz_center))
-    
-    # Find local minima to the left and right of the center
-    left_min = np.argmin(y[:center_idx]) if center_idx > 0 else 0
-    right_min = np.argmin(y[center_idx:]) + center_idx if center_idx < len(y)-1 else len(y)-1
-    
-    detected_min = x[left_min]
-    detected_max = x[right_min]
-    
-    # If detection goes to window edges and we have full spectrum, expand search
-    if full_ms_df is not None and (left_min == 0 or right_min == len(y)-1):
-        # Use full spectrum for wider peak detection
-        full_smoothed = full_ms_df["Intensity"].rolling(window=51, center=True, min_periods=1).mean()
+    Parameters:
+        x: m/z values
+        y: intensity values
+        integration_range: (min_mz, max_mz) for integration
         
-        # Find the closest point to the charge state m/z in full spectrum
-        full_center_idx = np.argmin(np.abs(full_ms_df["m/z"].values - mz_center))
+    Returns:
+        area: integrated area above baseline
+        baseline: fitted baseline values
+    """
+    # Get data within integration range
+    mask = (x >= integration_range[0]) & (x <= integration_range[1])
+    if np.sum(mask) < 3:
+        return 0.0, np.zeros_like(y)
+    
+    x_region = x[mask]
+    y_region = y[mask]
+    
+    # Use the first and last 10% of points to fit baseline
+    n_points = len(x_region)
+    baseline_fraction = max(0.1, 3.0 / n_points)  # At least 10% or 3 points
+    n_baseline = max(3, int(n_points * baseline_fraction))
+    
+    # Get baseline points from edges
+    baseline_x = np.concatenate([x_region[:n_baseline], x_region[-n_baseline:]])
+    baseline_y = np.concatenate([y_region[:n_baseline], y_region[-n_baseline:]])
+    
+    # Fit linear baseline
+    try:
+        baseline_model = LinearRegression()
+        baseline_model.fit(baseline_x.reshape(-1, 1), baseline_y)
         
-        # Expand search in full spectrum
-        full_left_min = np.argmin(full_smoothed.iloc[:full_center_idx]) if full_center_idx > 0 else 0
-        full_right_min = np.argmin(full_smoothed.iloc[full_center_idx:]) + full_center_idx if full_center_idx < len(full_smoothed)-1 else len(full_smoothed)-1
+        # Calculate baseline for entire range
+        baseline_region = baseline_model.predict(x_region.reshape(-1, 1))
         
-        detected_min = full_ms_df["m/z"].iloc[full_left_min]
-        detected_max = full_ms_df["m/z"].iloc[full_right_min]
-    
-    return detected_min, detected_max
-
-def plot_and_integrate_with_unzoom(ms_df: pd.DataFrame, mz: float, selected_range: Tuple[float, float], 
-                                  smoothing_window: int, show_zoomed: bool = True) -> Tuple[Optional[float], bool]:
-    """Plot spectrum with option to unzoom if peak is wider than window."""
-    if show_zoomed:
-        mz_window_min = mz * 0.90
-        mz_window_max = mz * 1.10
-        ms_df_window = ms_df[(ms_df["m/z"] >= mz_window_min) & (ms_df["m/z"] <= mz_window_max)].copy()
-        title_suffix = " (Zoomed)"
-    else:
-        ms_df_window = ms_df.copy()
-        title_suffix = " (Full Spectrum)"
-    
-    ms_df_window["Smoothed"] = ms_df_window["Intensity"].rolling(
-        window=max(1, smoothing_window), center=True, min_periods=1
-    ).mean()
-    
-    shade_df = ms_df_window[(ms_df_window["m/z"] >= selected_range[0]) & (ms_df_window["m/z"] <= selected_range[1])]
-    
-    fig, ax = plt.subplots(figsize=(8, 4))
-    ax.plot(ms_df_window["m/z"], ms_df_window["Smoothed"], color="blue")
-    ax.axvline(mz, color="red", linestyle="--", alpha=0.7, label="Selected m/z")
-    
-    # Check if range extends beyond current view
-    range_outside_view = (selected_range[0] < ms_df_window["m/z"].min() or 
-                         selected_range[1] > ms_df_window["m/z"].max())
-    
-    area = None
-    if len(shade_df) >= 2:
-        x = shade_df["m/z"].values
-        y = shade_df["Smoothed"].values
-        baseline = np.linspace(y[0], y[-1], len(y))
-        ax.fill_between(x, y, baseline, color="orange", alpha=0.4)
-        integral = np.trapz(y - baseline, x)
-        if integral > 0:
-            area = integral
+        # Ensure baseline doesn't go above the signal
+        baseline_region = np.minimum(baseline_region, y_region)
+        
+        # Calculate area above baseline using trapezoidal rule
+        corrected_y = y_region - baseline_region
+        corrected_y = np.maximum(corrected_y, 0)  # Remove negative values
+        
+        if len(corrected_y) > 1:
+            # Use numpy's trapz instead of scipy's deprecated trapz
+            area = np.trapz(corrected_y, x_region)
         else:
-            st.warning("No peak detected or negative area. Please adjust the integration range.")
-    else:
-        if range_outside_view:
-            st.warning("Integration range extends beyond current view. Click 'Show Full Spectrum' to see complete range.")
-        else:
-            ax.fill_between(shade_df["m/z"], shade_df["Smoothed"], color="orange", alpha=0.4)
-            st.warning("No peak detected in selected range.")
-    
-    ax.set_xlabel("m/z")
-    ax.set_ylabel("Smoothed Intensity")
-    ax.set_title(f"Integration region: {selected_range[0]:.3f} - {selected_range[1]:.3f} m/z{title_suffix}")
-    ax.legend()
-    st.pyplot(fig, clear_figure=True)
-    
-    return area, range_outside_view
+            area = 0.0
+            
+        # Create full baseline array for plotting
+        full_baseline = np.zeros_like(y)
+        full_baseline[mask] = baseline_region
+        
+        return max(0.0, area), full_baseline
+        
+    except Exception as e:
+        st.warning(f"Baseline fitting failed: {str(e)}. Using simple integration.")
+        # Fallback to simple integration
+        area = np.trapz(y_region, x_region)
+        return max(0.0, area), np.zeros_like(y)
 
-def plot_full_mass_spectrum(ms_df: pd.DataFrame, protein_name: str, protein_masses: Dict[str, float], 
-                          charge_range: Tuple[int, int], selected_charge: int) -> None:
-    """Plot the full mass spectrum with vertical lines for all charge states and label them."""
+def get_automatic_range(mz_center: float, percent: float) -> Tuple[float, float]:
+    """Get automatic integration range based on percentage of m/z."""
+    delta = mz_center * (percent / 100.0)
+    return mz_center - delta, mz_center + delta
+
+def plot_and_integrate_with_baseline(ms_df: pd.DataFrame, mz: float, selected_range: Tuple[float, float], 
+                                   smoothing_window: int, show_zoomed: bool = True) -> Tuple[Optional[float], bool]:
+    """Plot spectrum with baseline fitting and integration."""
+    try:
+        if show_zoomed:
+            mz_window_min = mz * 0.90
+            mz_window_max = mz * 1.10
+            ms_df_window = ms_df[(ms_df["m/z"] >= mz_window_min) & (ms_df["m/z"] <= mz_window_max)].copy()
+            title_suffix = " (Zoomed)"
+        else:
+            ms_df_window = ms_df.copy()
+            title_suffix = " (Full Spectrum)"
+        
+        if len(ms_df_window) == 0:
+            st.warning("No data in selected range.")
+            return None, False
+        
+        ms_df_window["Smoothed"] = ms_df_window["Intensity"].rolling(
+            window=max(1, smoothing_window), center=True, min_periods=1
+        ).mean()
+        
+        # Get data for integration
+        integration_mask = (ms_df_window["m/z"] >= selected_range[0]) & (ms_df_window["m/z"] <= selected_range[1])
+        integration_df = ms_df_window[integration_mask]
+        
+        # Check if range extends beyond current view
+        range_outside_view = (selected_range[0] < ms_df_window["m/z"].min() or 
+                             selected_range[1] > ms_df_window["m/z"].max())
+        
+        fig, ax = plt.subplots(figsize=(10, 6))
+        
+        # Plot the spectrum
+        ax.plot(ms_df_window["m/z"], ms_df_window["Smoothed"], color="blue", linewidth=1.5, label="Smoothed spectrum")
+        ax.axvline(mz, color="red", linestyle="--", alpha=0.7, label=f"Theoretical m/z: {mz:.3f}")
+        
+        area = None
+        if len(integration_df) >= 3:
+            x = integration_df["m/z"].values
+            y = integration_df["Smoothed"].values
+            
+            # Fit baseline and integrate
+            area, baseline = fit_baseline_and_integrate(
+                ms_df_window["m/z"].values, 
+                ms_df_window["Smoothed"].values, 
+                selected_range
+            )
+            
+            # Plot baseline in integration region
+            baseline_mask = (ms_df_window["m/z"] >= selected_range[0]) & (ms_df_window["m/z"] <= selected_range[1])
+            if np.any(baseline_mask):
+                baseline_x = ms_df_window["m/z"].values[baseline_mask]
+                baseline_y = baseline[baseline_mask]
+                ax.plot(baseline_x, baseline_y, 'g--', linewidth=2, label="Fitted baseline")
+                
+                # Fill area above baseline
+                spectrum_y = ms_df_window["Smoothed"].values[baseline_mask]
+                ax.fill_between(baseline_x, baseline_y, spectrum_y, 
+                               where=(spectrum_y >= baseline_y), 
+                               color="orange", alpha=0.4, label="Integrated area")
+            
+            # Add integration bounds
+            ax.axvline(selected_range[0], color="green", linestyle="-", alpha=0.8, linewidth=2)
+            ax.axvline(selected_range[1], color="green", linestyle="-", alpha=0.8, linewidth=2)
+            
+            if area <= 0:
+                st.warning("No positive area detected above baseline. Please adjust the integration range.")
+                area = None
+        else:
+            if range_outside_view:
+                st.warning("Integration range extends beyond current view. Click 'Toggle Zoom' to see complete range.")
+            else:
+                st.warning("Integration range too small (less than 3 points). Please expand the range.")
+        
+        ax.set_xlabel("m/z")
+        ax.set_ylabel("Smoothed Intensity")
+        ax.set_title(f"Integration region: {selected_range[0]:.3f} - {selected_range[1]:.3f} m/z{title_suffix}")
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        
+        # Add area annotation if calculated
+        if area is not None:
+            ax.text(0.02, 0.98, f"Area: {area:.2e}", transform=ax.transAxes, 
+                   verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+        
+        st.pyplot(fig, clear_figure=True)
+        plt.close(fig)  # Explicitly close to prevent memory leaks
+        
+        return area, range_outside_view
+        
+    except Exception as e:
+        st.error(f"Error in plotting/integration: {str(e)}")
+        return None, False
+
+def plot_full_mass_spectrum_with_ranges(ms_df: pd.DataFrame, protein_name: str, protein_masses: Dict[str, float], 
+                                       charge_range: Tuple[int, int], selected_charge: int,
+                                       scale_ranges: Dict = None) -> None:
+    """Plot the full mass spectrum with vertical lines for all charge states and their integration ranges."""
     mass = protein_masses[protein_name]
     
-    fig, ax = plt.subplots(figsize=(8, 3))
-    ax.plot(ms_df["m/z"], ms_df["Intensity"], color="gray", linewidth=1)
+    fig, ax = plt.subplots(figsize=(12, 6))
+    ax.plot(ms_df["m/z"], ms_df["Intensity"], color="gray", linewidth=1, alpha=0.7, label="Mass spectrum")
     
     # Add vertical lines for each charge state within the range
     min_charge, max_charge = charge_range
@@ -119,24 +194,33 @@ def plot_full_mass_spectrum(ms_df: pd.DataFrame, protein_name: str, protein_mass
         color = "red" if charge == selected_charge else "blue"
         alpha = 0.9 if charge == selected_charge else 0.5
         linestyle = "-" if charge == selected_charge else "--"
-        ax.axvline(mz, color=color, linestyle=linestyle, alpha=alpha)
+        linewidth = 2 if charge == selected_charge else 1
+        
+        ax.axvline(mz, color=color, linestyle=linestyle, alpha=alpha, linewidth=linewidth)
         
         # Add charge state label
         label_height = ax.get_ylim()[1] * 0.9
         ax.text(mz, label_height, f"{charge}+", 
                color=color, ha="center", va="top", 
-               fontsize=9, rotation=90, 
-               bbox=dict(facecolor='white', alpha=0.7, pad=1))
+               fontsize=10, fontweight='bold' if charge == selected_charge else 'normal',
+               bbox=dict(facecolor='white', alpha=0.8, pad=2))
+        
+        # Show integration range if defined
+        if scale_ranges and (protein_name, charge) in scale_ranges:
+            range_min, range_max = scale_ranges[(protein_name, charge)]
+            ax.axvspan(range_min, range_max, alpha=0.2, 
+                      color=color, label=f"Integration range {charge}+" if charge == selected_charge else "")
     
-    # Add selected charge state in legend
-    ax.plot([], [], color="red", linestyle="-", label=f"Selected: {selected_charge}+")
+    # Add legend
+    ax.plot([], [], color="red", linestyle="-", linewidth=2, label=f"Selected: {selected_charge}+")
     ax.plot([], [], color="blue", linestyle="--", alpha=0.5, label="Other charge states")
     
     # Set labels and title
     ax.set_xlabel("m/z")
     ax.set_ylabel("Intensity")
-    ax.set_title(f"Full Mass Spectrum for {protein_name}")
+    ax.set_title(f"Mass Spectrum for {protein_name} - All Charge States and Integration Ranges")
     ax.legend(loc="upper right")
+    ax.grid(True, alpha=0.3)
     st.pyplot(fig, clear_figure=True)
 
 # --- Data Classes ---
@@ -183,17 +267,38 @@ class CalibratedDriftProcessor:
     @staticmethod
     def calculate_scale_factor(ms_df: pd.DataFrame, protein_name: str, charge_state: int, 
                               protein_mass: float, scale_ranges: Dict) -> Tuple[Optional[float], float]:
-        """Calculate scaling factor from mass spectrum integration"""
+        """Calculate scaling factor from mass spectrum integration with baseline fitting"""
         if ms_df is None or protein_mass is None:
             return None, None
             
         mz = (protein_mass + PROTON_MASS * charge_state) / charge_state
-        mz_min, mz_max = scale_ranges.get((protein_name, charge_state), (mz * 0.995, mz * 1.005))
+        range_key = (protein_name, charge_state)
+        
+        if range_key not in scale_ranges:
+            return None, mz
+            
+        mz_min, mz_max = scale_ranges[range_key]
         
         try:
-            scale_factor = ms_df[(ms_df["m/z"] >= mz_min) & (ms_df["m/z"] <= mz_max)]["Intensity"].sum()
-            return scale_factor, mz
-        except Exception:
+            # Get data in range
+            mask = (ms_df["m/z"] >= mz_min) & (ms_df["m/z"] <= mz_max)
+            if np.sum(mask) < 3:
+                return None, mz
+            
+            # Apply smoothing
+            smoothed_intensity = ms_df["Intensity"].rolling(window=51, center=True, min_periods=1).mean()
+            
+            # Use baseline fitting for more accurate integration
+            scale_factor, _ = fit_baseline_and_integrate(
+                ms_df["m/z"].values, 
+                smoothed_intensity.values, 
+                (mz_min, mz_max)
+            )
+            
+            return scale_factor if scale_factor > 0 else None, mz
+            
+        except Exception as e:
+            st.warning(f"Scale factor calculation failed for {protein_name} charge {charge_state}: {str(e)}")
             return None, mz
 
     @staticmethod
@@ -342,76 +447,70 @@ class CalibratedDriftProcessor:
 
     @staticmethod
     def get_optimal_charge_ranges(ms_df: pd.DataFrame, protein_mass: float, min_charge: int = None, max_charge: int = 20) -> Dict[int, Tuple[float, float]]:
-        """
-        Define optimal m/z ranges for each charge state, scaling with 1/n.
-        
-        Parameters:
-            ms_df: DataFrame containing the mass spectrum data
-            protein_mass: Mass of the protein in Da
-            min_charge: Minimum charge state (will be calculated if None)
-            max_charge: Maximum charge state to consider
+        """Define optimal m/z ranges for each charge state with better error handling."""
+        try:
+            # Get global m/z bounds from the data
+            global_min_mz = ms_df["m/z"].min()
+            global_max_mz = ms_df["m/z"].max()
             
-        Returns:
-            Dictionary mapping charge states to their (min_mz, max_mz) ranges
-        """
-        # Get global m/z bounds from the data
-        global_min_mz = ms_df["m/z"].min()
-        global_max_mz = ms_df["m/z"].max()
-        
-        # Determine minimum charge state if not provided
-        if min_charge is None:
-            # Find charge state where m/z falls within spectrum range
-            for c in range(max_charge, 0, -1):
-                mz = (protein_mass + PROTON_MASS * c) / c
-                if mz <= global_max_mz:
-                    min_charge = c
-                    break
-            
-            # If still None, default to charge state 1
+            # Determine minimum charge state if not provided
             if min_charge is None:
-                min_charge = 1
-        
-        # Calculate theoretical m/z for each charge state
-        charge_mz = {}
-        for c in range(min_charge, max_charge + 1):
-            mz = (protein_mass + PROTON_MASS * c) / c
-            if global_min_mz <= mz <= global_max_mz:  # Only include if within spectrum
-                charge_mz[c] = mz
-        
-        if not charge_mz:
-            return {}  # No valid charge states in range
-        
-        # Sort charge states by m/z (descending)
-        sorted_charges = sorted(charge_mz.keys(), key=lambda c: charge_mz[c], reverse=True)
-        
-        # Define boundaries between charge states
-        charge_ranges = {}
-        
-        for i, c in enumerate(sorted_charges):
-            current_mz = charge_mz[c]
+                # Find charge state where m/z falls within spectrum range
+                for c in range(max_charge, 0, -1):
+                    mz = (protein_mass + PROTON_MASS * c) / c
+                    if mz <= global_max_mz:
+                        min_charge = c
+                        break
+                
+                # If still None, default to charge state 1
+                if min_charge is None:
+                    min_charge = 1
             
-            # For first (highest m/z) charge state
-            if i == 0:
-                upper_bound = global_max_mz
-            else:
-                prev_c = sorted_charges[i-1]
-                prev_mz = charge_mz[prev_c]
-                # Boundary between this charge state and the previous one
-                upper_bound = (current_mz + prev_mz) / 2
+            # Calculate theoretical m/z for each charge state
+            charge_mz = {}
+            for c in range(min_charge, max_charge + 1):
+                mz = (protein_mass + PROTON_MASS * c) / c
+                if global_min_mz <= mz <= global_max_mz:  # Only include if within spectrum
+                    charge_mz[c] = mz
             
-            # For last (lowest m/z) charge state
-            if i == len(sorted_charges) - 1:
-                lower_bound = global_min_mz
-            else:
-                next_c = sorted_charges[i+1]
-                next_mz = charge_mz[next_c]
-                # Boundary between this charge state and the next one
-                lower_bound = (current_mz + next_mz) / 2
+            if not charge_mz:
+                return {}  # No valid charge states in range
             
-            # Store the range for this charge state
-            charge_ranges[c] = (lower_bound, upper_bound)
-        
-        return charge_ranges
+            # Sort charge states by m/z (descending)
+            sorted_charges = sorted(charge_mz.keys(), key=lambda c: charge_mz[c], reverse=True)
+            
+            # Define boundaries between charge states
+            charge_ranges = {}
+            
+            for i, c in enumerate(sorted_charges):
+                current_mz = charge_mz[c]
+                
+                # For first (highest m/z) charge state
+                if i == 0:
+                    upper_bound = global_max_mz
+                else:
+                    prev_c = sorted_charges[i-1]
+                    prev_mz = charge_mz[prev_c]
+                    # Boundary between this charge state and the previous one
+                    upper_bound = (current_mz + prev_mz) / 2
+                
+                # For last (lowest m/z) charge state
+                if i == len(sorted_charges) - 1:
+                    lower_bound = global_min_mz
+                else:
+                    next_c = sorted_charges[i+1]
+                    next_mz = charge_mz[next_c]
+                    # Boundary between this charge state and the next one
+                    lower_bound = (current_mz + next_mz) / 2
+                
+                # Store the range for this charge state
+                charge_ranges[c] = (lower_bound, upper_bound)
+            
+            return charge_ranges
+            
+        except Exception as e:
+            st.error(f"Error calculating optimal charge ranges: {str(e)}")
+            return {}
 
 # --- UI Components ---
 class UI:
@@ -428,14 +527,17 @@ class UI:
     def show_info_card():
         st.markdown("""
         <div class="info-card">
-            <p><strong>NEW:</strong> ATD intensities are now normalized so each charge state has a maximum intensity of 1 before scaling is applied.</p>
+            <p>Use this page to generate calibrated and scaled CCSDs for each protein using the processed IMSCal<sup>1</sup> output files. This step completes the calibration process by normalizing ATD intensities to a maximum of 1, then matching calibration data and scaling using mass spectrum integration with baseline fitting.</p>
+            <p>This process is particularly useful when you have performed multiple experiments on the same protein (e.g., activated ion mobility experiments at different collision voltages). In such cases, you only need to calibrate once using IMSCal, then use this tool to process all your experimental conditions.</p>
             <p><strong>What you'll need:</strong></p>
             <ul>
-                <li>ZIP file containing raw drift files (X.txt format and mass_spectrum.txt per protein)</li>
-                <li>CSV files from the 'Process Output Files' step</li>
-                <li>Protein masses for each protein</li>
-                <li>Charge state range to include</li>
+                <li><strong>ZIP file containing raw drift files:</strong> Each protein folder should contain X.txt files (where X is the charge state) and a mass_spectrum.txt file</li>
+                <li><strong>CSV files from the 'Process Output Files' step:</strong> These contain the calibration data generated in the previous step</li>
+                <li><strong>Protein masses:</strong> Molecular mass (Da) for each protein</li>
+                <li><strong>Charge state range:</strong> Specify which charge states to include in the analysis</li>
+                <li><strong>Integration ranges:</strong> Define m/z ranges for mass spectrum integration to calculate scaling factors</li>
             </ul>
+            <p><strong>Note:</strong> This step performs baseline fitting and integration for accurate scaling. The output includes both normalized intensities (max=1) and scaled intensities (normalized × mass spectrum scale factor).</p>
         </div>
         """, unsafe_allow_html=True)
 
@@ -516,6 +618,50 @@ class UI:
         return instrument_type, inject_time
 
     @staticmethod
+    def show_processing_status(processed_files: int, matched_points: int, output_files: int):
+        """Show processing status summary"""
+        st.markdown("""
+        <div class="section-card">
+            <div class="section-header">✅ Processing Complete</div>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Files Processed", processed_files)
+        with col2:
+            st.metric("Data Points Matched", matched_points)
+        with col3:
+            st.metric("Output Files Generated", output_files)
+
+    @staticmethod
+    def show_protein_card(protein_name: str, total_points: int, charge_states: int):
+        """Show summary card for each protein"""
+        with st.expander(f"📊 {protein_name} Summary", expanded=False):
+            col1, col2 = st.columns(2)
+            with col1:
+                st.write(f"**Total Data Points:** {total_points}")
+            with col2:
+                st.write(f"**Charge States:** {charge_states}")
+
+    @staticmethod
+    def show_next_steps():
+        """Show next steps information"""
+        st.markdown("""
+        <div class="info-card">
+            <h4>🎯 Next Steps</h4>
+            <p>Your normalized and calibrated drift data is ready! The output includes:</p>
+            <ul>
+                <li><strong>Normalized_Intensity:</strong> Original intensity normalized to max=1 per charge state</li>
+                <li><strong>Scaled_Intensity:</strong> Normalized intensity × mass spectrum integration scale factor</li>
+                <li><strong>CCS values:</strong> Matched calibration data</li>
+                <li><strong>m/z values:</strong> Theoretical m/z for each charge state</li>
+            </ul>
+            <p>Use this data for further analysis or visualization.</p>
+        </div>
+        """, unsafe_allow_html=True)
+
+    @staticmethod
     def show_integration_range_selector(tmpdir_name: str, protein_names: List[str], protein_masses: Dict[str, float]) -> Tuple[Dict, Dict]:
         st.markdown("""
         <div class="section-card">
@@ -528,91 +674,89 @@ class UI:
         scale_ranges = st.session_state.setdefault("scale_ranges", {})
         scale_factors = st.session_state.setdefault("scale_factors", {})
 
-        # Smoothing slider (now 0 to 1000 points)
-        smoothing_window = st.slider(
-            "Smoothing window (number of points)", min_value=0, max_value=1000, value=51, step=1
-        )
+        # Controls section
+        col1, col2, col3 = st.columns([2, 1, 1])
+        
+        with col1:
+            smoothing_window = st.slider(
+                "Smoothing window (number of points)", min_value=0, max_value=1000, value=51, step=1
+            )
+        
+        with col2:
+            auto_percent = st.number_input(
+                "Auto range (%)", min_value=0.01, max_value=5.0, value=0.1, step=0.01,
+                help="Percentage of m/z to use for automatic range (±%)"
+            )
+        
+        with col3:
+            if st.button("🔄 Auto-set all ranges"):
+                for prot in protein_names:
+                    mass = protein_masses[prot]
+                    if mass > 0:
+                        min_c, max_c = charge_ranges[prot]
+                        for c in range(int(min_c), int(max_c)+1):
+                            mz = (mass + PROTON_MASS * c) / c
+                            auto_min, auto_max = get_automatic_range(mz, auto_percent)
+                            scale_ranges[(prot, c)] = (auto_min, auto_max)
+                
+                st.session_state["scale_ranges"] = scale_ranges
+                st.success(f"Auto-set all ranges to ±{auto_percent}% of theoretical m/z")
 
-        # Autogenerate all scale factors button
-        autogen = st.button("Autodetect & Autogenerate scale factors for all proteins/charges")
-
+        # Protein and charge selection
         selected_protein = st.selectbox("Select protein for integration setup", protein_names)
-        min_charge = st.number_input(
-            f"Minimum charge for {selected_protein}", min_value=1, value=charge_ranges[selected_protein][0], key=f"min_charge_{selected_protein}"
-        )
-        max_charge = st.number_input(
-            f"Maximum charge for {selected_protein}", min_value=min_charge, value=charge_ranges[selected_protein][1], key=f"max_charge_{selected_protein}"
-        )
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            min_charge = st.number_input(
+                f"Minimum charge for {selected_protein}", min_value=1, 
+                value=charge_ranges[selected_protein][0], key=f"min_charge_{selected_protein}"
+            )
+        with col2:
+            max_charge = st.number_input(
+                f"Maximum charge for {selected_protein}", min_value=min_charge, 
+                value=charge_ranges[selected_protein][1], key=f"max_charge_{selected_protein}"
+            )
+        
         charge_ranges[selected_protein] = (min_charge, max_charge)
         st.session_state["charge_ranges"] = charge_ranges
 
         selected_charge = st.number_input(
-            f"Select charge state for {selected_protein}", min_value=min_charge, max_value=max_charge, value=min_charge, key=f"charge_{selected_protein}"
+            f"Select charge state for {selected_protein}", min_value=min_charge, 
+            max_value=max_charge, value=min_charge, key=f"charge_{selected_protein}"
         )
 
+        # Load mass spectrum and show overview
         protein_dir = os.path.join(tmpdir_name, selected_protein)
         ms_path = os.path.join(protein_dir, "mass_spectrum.txt")
         ms_df = CalibratedDriftProcessor.load_mass_spectrum(ms_path)
+        
         if ms_df is not None:
-            plot_full_mass_spectrum(
-                ms_df, selected_protein, protein_masses, charge_ranges[selected_protein], selected_charge
+            plot_full_mass_spectrum_with_ranges(
+                ms_df, selected_protein, protein_masses, 
+                charge_ranges[selected_protein], selected_charge, scale_ranges
             )
 
-        # Autogenerate scale factors using autodetection
-        if autogen:
-            for prot in protein_names:
-                mass = protein_masses[prot]
-                min_c, max_c = charge_ranges[prot]
-                protein_dir = os.path.join(tmpdir_name, prot)
-                ms_path = os.path.join(protein_dir, "mass_spectrum.txt")
-                ms_df = CalibratedDriftProcessor.load_mass_spectrum(ms_path)
-                if ms_df is None or mass == 0:
-                    continue
-                
-                # Get optimal charge ranges based on 1/n scaling
-                optimal_ranges = get_optimal_charge_ranges(ms_df, mass, min_c, 20)
-                
-                # Process each charge state with its optimal range
-                for c in range(int(min_c), int(max_c)+1):
-                    if c not in optimal_ranges:
-                        continue
-                        
-                    mz = (mass + PROTON_MASS * c) / c
-                    mz_range = optimal_ranges[c]
-                    
-                    # Use the optimal range for this charge state
-                    ms_df_window = ms_df[(ms_df["m/z"] >= mz_range[0]) & (ms_df["m/z"] <= mz_range[1])].copy()
-                    ms_df_window["Smoothed"] = ms_df_window["Intensity"].rolling(
-                        window=max(1, smoothing_window), center=True, min_periods=1
-                    ).mean()
-                    
-                    # Use autodetection centered on theoretical m/z
-                    auto_min, auto_max = autodetect_peak_and_range(ms_df_window, None, mz)
-                    
-                    # No need to check for overlaps since we're using non-overlapping ranges
-                    area, _ = plot_and_integrate_with_unzoom(ms_df, mz, (auto_min, auto_max), smoothing_window, False)
-                    if area is not None:
-                        scale_ranges[(prot, c)] = (auto_min, auto_max)
-                        scale_factors[(prot, c)] = area
-            
-            st.session_state["scale_ranges"] = scale_ranges
-            st.session_state["scale_factors"] = scale_factors
-            st.success("Scale factors autodetected and autogenerated for all proteins/charges.")
-
-        # Manual selection for current protein/charge
-        if os.path.exists(ms_path):
-            ms_df = CalibratedDriftProcessor.load_mass_spectrum(ms_path)
-            if ms_df is not None:
-                mass = protein_masses[selected_protein]
+        # Manual range selection for current protein/charge
+        if os.path.exists(ms_path) and ms_df is not None and len(ms_df) > 0:
+            mass = protein_masses[selected_protein]
+            if mass > 0:
                 mz = (mass + PROTON_MASS * selected_charge) / selected_charge
                 
                 # Zoom control
                 show_zoomed = st.session_state.get(f"show_zoomed_{selected_protein}_{selected_charge}", True)
-                col1, col2 = st.columns([3, 1])
+                col1, col2, col3 = st.columns([2, 1, 1])
+                
                 with col2:
                     if st.button("🔍 Toggle Zoom", key=f"zoom_{selected_protein}_{selected_charge}"):
                         st.session_state[f"show_zoomed_{selected_protein}_{selected_charge}"] = not show_zoomed
-                        st.experimental_rerun()
+                        st.rerun()
+                
+                with col3:
+                    if st.button("🎯 Auto Range", key=f"auto_{selected_protein}_{selected_charge}"):
+                        auto_min, auto_max = get_automatic_range(mz, auto_percent)
+                        scale_ranges[(selected_protein, selected_charge)] = (auto_min, auto_max)
+                        st.session_state["scale_ranges"] = scale_ranges
+                        st.rerun()
                 
                 if show_zoomed:
                     mz_window_min = mz * 0.90
@@ -621,123 +765,95 @@ class UI:
                 else:
                     ms_df_window = ms_df.copy()
                 
-                ms_df_window["Smoothed"] = ms_df_window["Intensity"].rolling(
-                    window=max(1, smoothing_window), center=True, min_periods=1
-                ).mean()
-                
-                mz_min = float(ms_df_window["m/z"].min())
-                mz_max = float(ms_df_window["m/z"].max())
-                
-                # Use charge-specific window for autodetection centered on theoretical m/z
-                default_min, default_max = autodetect_peak_and_range(ms_df_window, None, mz)
-                
-                current_range = scale_ranges.get(
-                    (selected_protein, selected_charge),
-                    (default_min, default_max)
-                )
-                
-                # Ensure slider range covers the detected range
-                slider_min = min(mz_min, current_range[0] - 0.01)
-                slider_max = max(mz_max, current_range[1] + 0.01)
-                
-                selected_range = st.slider(
-                    f"Integration range for {selected_protein} charge {selected_charge}",
-                    min_value=slider_min,
-                    max_value=slider_max,
-                    value=current_range,
-                    step=0.001,
-                    format="%.3f",
-                    key=f"slider_{selected_protein}_{selected_charge}"
-                )
-                
-                st.write(f"Selected integration range: {selected_range[0]:.3f} - {selected_range[1]:.3f} m/z")
-                
-                area, range_outside_view = plot_and_integrate_with_unzoom(
-                    ms_df, mz, selected_range, smoothing_window, show_zoomed
-                )
-                
-                if range_outside_view and show_zoomed:
-                    st.info("💡 Integration range extends beyond zoomed view. Use 'Toggle Zoom' to see full spectrum.")
-                
-                if area is not None:
-                    scale_ranges[(selected_protein, selected_charge)] = selected_range
-                    st.session_state["scale_ranges"] = scale_ranges
-                    scale_factors[(selected_protein, selected_charge)] = area
-                    st.session_state["scale_factors"] = scale_factors
-                    st.write(f"Integration area (scale factor, above line): {area:.2e}")
-                else:
-                    st.write("No valid peak detected for this charge state.")
+                if len(ms_df_window) > 0:
+                    ms_df_window["Smoothed"] = ms_df_window["Intensity"].rolling(
+                        window=max(1, smoothing_window), center=True, min_periods=1
+                    ).mean()
+                    
+                    mz_min = float(ms_df_window["m/z"].min())
+                    mz_max = float(ms_df_window["m/z"].max())
+                    
+                    # Get current range or use automatic default
+                    current_range = scale_ranges.get(
+                        (selected_protein, selected_charge),
+                        get_automatic_range(mz, auto_percent)
+                    )
+                    
+                    # Ensure slider range covers the detected range
+                    slider_min = min(mz_min, current_range[0] - 0.01)
+                    slider_max = max(mz_max, current_range[1] + 0.01)
+                    
+                    selected_range = st.slider(
+                        f"Integration range for {selected_protein} charge {selected_charge}",
+                        min_value=slider_min,
+                        max_value=slider_max,
+                        value=current_range,
+                        step=0.001,
+                        format="%.3f",
+                        key=f"slider_{selected_protein}_{selected_charge}"
+                    )
+                    
+                    st.write(f"Selected integration range: {selected_range[0]:.3f} - {selected_range[1]:.3f} m/z")
+                    
+                    area, range_outside_view = plot_and_integrate_with_baseline(
+                        ms_df, mz, selected_range, smoothing_window, show_zoomed
+                    )
+                    
+                    if range_outside_view and show_zoomed:
+                        st.info("💡 Integration range extends beyond zoomed view. Use 'Toggle Zoom' to see full spectrum.")
+                    
+                    if area is not None and area > 0:
+                        scale_ranges[(selected_protein, selected_charge)] = selected_range
+                        st.session_state["scale_ranges"] = scale_ranges
+                        scale_factors[(selected_protein, selected_charge)] = area
+                        st.session_state["scale_factors"] = scale_factors
+                        st.success(f"✅ Integration area (scale factor): {area:.2e}")
+                    else:
+                        st.warning("⚠️ No valid peak detected for this charge state. Try adjusting the range.")
 
-        # Tabulate scale factors for all proteins/charges
-        if scale_factors:
-            st.markdown("#### Scale Factors Table")
+        # Show summary table
+        if scale_factors or scale_ranges:
+            st.markdown("#### Integration Ranges and Scale Factors")
             rows = []
             for prot in protein_names:
                 min_c, max_c = charge_ranges[prot]
                 for c in range(int(min_c), int(max_c)+1):
                     factor = scale_factors.get((prot, c), None)
-                    rng = scale_ranges.get((prot, c), ("-", "-"))
+                    rng = scale_ranges.get((prot, c), None)
+                    
                     rows.append({
                         "Protein": prot,
                         "Charge": c,
-                        "Integration Range (m/z)": f"{rng[0]:.3f} - {rng[1]:.3f}" if rng[0] != "-" else "-",
-                        "Scale Factor": f"{factor:.2e}" if factor is not None else "-"
+                        "Integration Range (m/z)": f"{rng[0]:.3f} - {rng[1]:.3f}" if rng else "Not set",
+                        "Scale Factor": f"{factor:.2e}" if factor is not None else "Not calculated"
                     })
-            st.dataframe(pd.DataFrame(rows))
+            
+            df_display = pd.DataFrame(rows)
+            st.dataframe(df_display, use_container_width=True)
 
         return scale_ranges, charge_ranges
-
-    @staticmethod
-    def show_processing_status(processed_files: int, matched_points: int, protein_count: int):
-        st.markdown(f"""
-        <div class="status-card success-card">
-            <strong>🎉 Processing Complete!</strong><br>
-            Processed <span class="metric-badge">{processed_files} files</span>
-            with <span class="metric-badge">{matched_points} matched data points</span>
-            for <span class="metric-badge">{protein_count} proteins</span>
-        </div>
-        """, unsafe_allow_html=True)
-
-    @staticmethod
-    def show_protein_card(protein_name: str, total_points: int, charge_states: int):
-        st.markdown(f"""
-        <div class="protein-card">
-            <h4 style="color: #667eea; margin: 0 0 0.5rem 0;">🧬 {protein_name}</h4>
-            <p style="margin: 0; color: #64748b;">
-                <span class="metric-badge">{total_points} calibrated points</span>
-                <span class="metric-badge">{charge_states} charge states</span>
-            </p>
-        </div>
-        """, unsafe_allow_html=True)
-
-    @staticmethod
-    def show_next_steps():
-        st.markdown("""
-        <div class="info-card">
-            <h4 style="color: #667eea; margin-top: 0;">🎯 Next Steps</h4>
-            <p>Your normalized and calibrated drift data is ready! Each CSV file contains:</p>
-            <ul>
-                <li><strong>Charge:</strong> Charge state</li>
-                <li><strong>Drift:</strong> Drift time (seconds)</li>
-                <li><strong>CCS:</strong> Collision cross-section</li>
-                <li><strong>CCS Std.Dev.:</strong> Standard deviation</li>
-                <li><strong>Normalized_Intensity:</strong> ATD intensity normalized to max=1</li>
-                <li><strong>Scaled_Intensity:</strong> Normalized intensity × mass spectrum integration</li>
-                <li><strong>m/z:</strong> Calculated m/z value</li>
-            </ul>
-        </div>
-        """, unsafe_allow_html=True)
 
 # --- Main App ---
 def main():
     styling.load_custom_css()
     UI.show_main_header()
     UI.show_info_card()
+    
+    # Clear cache button inside info card for consistent styling
+    if st.button("🧹 Clear Cache & Restart App"):
+        import_tools.clear_cache()
 
     # Step 1: Upload files
     drift_zip = UI.show_upload_section()
     cal_csvs = UI.show_calibration_upload()
     if not drift_zip or not cal_csvs:
+        # Add references section when no files are uploaded
+        st.markdown("""
+        <div class="info-card">
+            <h3>📚 References</h3>
+            <p><sup>1</sup> I. Sergent, A. I. Adjieufack, A. Gaudel-Siri and L. Charles, <em> International Journal of Mass Spectrometry,</em>,2023, 492, 117112.</p>
+        </div>
+        """, unsafe_allow_html=True)
         st.info("Upload both drift ZIP and calibration CSVs to continue.")
         return
 
@@ -794,6 +910,14 @@ def main():
             UI.show_next_steps()
         else:
             st.error("No matching data found. Please check your file formats and naming.")
+    
+    # Add references section at the end
+    st.markdown("""
+    <div class="info-card">
+        <h3>📚 References</h3>
+        <p><sup>1</sup> I. Sergent, A. I. Adjieufack, A. Gaudel-Siri and L. Charles, <em> International Journal of Mass Spectrometry,</em>,2023, 492, 117112.</p>
+    </div>
+    """, unsafe_allow_html=True)
 
 if __name__ == "__main__":
     main()
