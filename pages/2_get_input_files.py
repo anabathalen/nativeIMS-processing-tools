@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import pandas as pd
 import numpy as np
 import streamlit as st
@@ -30,6 +30,92 @@ class InputProcessor:
         self.base_path = base_path
         self.params = params
 
+    def _is_valid_data_file(self, file_path: Path) -> bool:
+        """Check if file is a valid data file to process."""
+        if file_path.suffix.lower() == '.csv':
+            # For CSV files, check if filename contains a charge state pattern
+            filename_without_ext = file_path.stem
+            
+            import re
+            patterns = [
+                r'range_(\d+)\.txt',  # Matches "range_24.txt"
+                r'range_(\d+)_',      # Matches "range_24_"
+                r'_(\d+)\.txt_raw',   # Matches "_24.txt_raw"
+                r'_(\d+)_raw$',       # Matches "_24_raw" at end
+                r'_(\d+)$'            # Matches "_24" at end
+            ]
+            
+            # Look for a numeric part that could be a charge state
+            for pattern in patterns:
+                if re.search(pattern, filename_without_ext):
+                    return True
+            return False
+        else:
+            # For .txt files, use original method
+            return (
+                file_path.suffix == '.txt' and 
+                file_path.name[0].isdigit()
+            )
+
+    def _extract_charge_state(self, file_path: Path) -> Optional[int]:
+        """Extract charge state from filename."""
+        if file_path.suffix.lower() == '.csv':
+            # For CSV files from TWIMExtract, extract charge state from end of filename
+            filename_without_ext = file_path.stem
+            
+            import re
+            patterns = [
+                r'range_(\d+)\.txt',  # Matches "range_24.txt"
+                r'range_(\d+)_',      # Matches "range_24_"
+                r'_(\d+)\.txt_raw',   # Matches "_24.txt_raw"
+                r'_(\d+)_raw$',       # Matches "_24_raw" at end
+                r'_(\d+)$'            # Matches "_24" at end
+            ]
+            
+            for pattern in patterns:
+                match = re.search(pattern, filename_without_ext)
+                if match:
+                    return int(match.group(1))
+            return None
+        else:
+            # For .txt files, use original method (filename starts with charge state)
+            try:
+                return int(file_path.stem)
+            except ValueError:
+                return None
+
+    def _load_data_from_file(self, file_path: Path) -> Tuple[np.ndarray, np.ndarray]:
+        """Load drift time and intensity data from either txt or csv file."""
+        if file_path.suffix.lower() == '.csv':
+            # Handle CSV format with potential comments
+            data_rows = []
+            with open(file_path, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    # Skip empty lines and comment lines (starting with #)
+                    if not line or line.startswith('#'):
+                        continue
+                    # Parse the data line
+                    try:
+                        values = line.split(',')
+                        if len(values) >= 2:
+                            drift_time = float(values[0])
+                            intensity = float(values[1])
+                            data_rows.append([drift_time, intensity])
+                    except (ValueError, IndexError):
+                        continue  # Skip malformed lines
+            
+            if not data_rows:
+                raise ValueError("No valid data found in CSV file")
+            
+            data = np.array(data_rows)
+            return data[:, 0], data[:, 1]
+        
+        else:  # .txt file
+            # Use original method for text files
+            data = np.loadtxt(file_path)
+            return data[:, 0], data[:, 1]
+
     def process_sample_folder(self, folder_name: str) -> (str, List[str], List[str]):
         processed_files = []
         failed_files = []
@@ -40,62 +126,50 @@ class InputProcessor:
             return output_folder, processed_files, failed_files
 
         for filename in os.listdir(sample_folder_path):
-            # Check for both .txt and .csv files that start with a digit
-            if (filename.endswith('.txt') or filename.endswith('.csv')) and filename[0].isdigit():
-                file_path = os.path.join(sample_folder_path, filename)
-                try:
-                    # Handle different file formats
-                    if filename.endswith('.csv'):
-                        # Handle CSV format with potential comments
-                        data_rows = []
-                        with open(file_path, 'r') as f:
-                            for line in f:
-                                line = line.strip()
-                                # Skip empty lines and comment lines (starting with #)
-                                if not line or line.startswith('#'):
-                                    continue
-                                # Parse the data line
-                                try:
-                                    values = line.split(',')
-                                    if len(values) >= 2:
-                                        drift_time = float(values[0])
-                                        intensity = float(values[1])
-                                        data_rows.append([drift_time, intensity])
-                                except (ValueError, IndexError):
-                                    continue  # Skip malformed lines
-                        
-                        if not data_rows:
-                            failed_files.append(f"{filename} - No valid data found in CSV file")
-                            continue
-                        
-                        data = np.array(data_rows)
-                    else:
-                        # Handle .txt files with the original method
-                        data = np.loadtxt(file_path)
-                    
-                    if data.ndim == 1 or data.shape[1] < 2:
-                        failed_files.append(f"{filename} - insufficient data columns")
-                        continue
-                    
-                    drift_time = data[:, 0]
-                    intensity = data[:, 1]
-                    if self.params.drift_mode == "Cyclic" and self.params.inject_time is not None:
-                        drift_time = drift_time - self.params.inject_time
-                    drift_time = np.maximum(drift_time, 0)
-                    index = np.arange(len(drift_time))
-                    df = pd.DataFrame({
-                        "index": index,
-                        "mass": self.params.sample_mass_map[folder_name],
-                        "charge": filename[:-4],  # Remove file extension
-                        "intensity": intensity,
-                        "drift_time": drift_time
-                    })
-                    dat_filename = f"input_{os.path.splitext(filename)[0]}.dat"
-                    dat_path = os.path.join(output_folder, dat_filename)
-                    df.to_csv(dat_path, sep=' ', index=False, header=False)
-                    processed_files.append(filename)
-                except Exception as e:
-                    failed_files.append(f"{filename} - {str(e)}")
+            file_path = Path(os.path.join(sample_folder_path, filename))
+            
+            # Use the same validation system as calibrate.py
+            if not self._is_valid_data_file(file_path):
+                continue
+                
+            try:
+                # Extract charge state using the same method as calibrate.py
+                charge_state = self._extract_charge_state(file_path)
+                if charge_state is None:
+                    failed_files.append(f"{filename} - Could not extract charge state from filename")
+                    continue
+                
+                # Load data using the same method as calibrate.py
+                drift_time, intensity = self._load_data_from_file(file_path)
+                
+                if len(drift_time) == 0 or len(intensity) == 0:
+                    failed_files.append(f"{filename} - No valid data found")
+                    continue
+                
+                # Apply drift time corrections
+                if self.params.drift_mode == "Cyclic" and self.params.inject_time is not None:
+                    drift_time = drift_time - self.params.inject_time
+                drift_time = np.maximum(drift_time, 0)
+                
+                # Create dataframe
+                index = np.arange(len(drift_time))
+                df = pd.DataFrame({
+                    "index": index,
+                    "mass": self.params.sample_mass_map[folder_name],
+                    "charge": charge_state,
+                    "intensity": intensity,
+                    "drift_time": drift_time
+                })
+                
+                # Save as .dat file
+                dat_filename = f"input_{charge_state}.dat"
+                dat_path = os.path.join(output_folder, dat_filename)
+                df.to_csv(dat_path, sep=' ', index=False, header=False)
+                processed_files.append(filename)
+                
+            except Exception as e:
+                failed_files.append(f"{filename} - {str(e)}")
+        
         return output_folder, processed_files, failed_files
 
     def process_all(self, sample_folders: List[str]) -> InputProcessingResult:
@@ -140,10 +214,10 @@ class UI:
         st.markdown("""
         <div class="info-card">
             <p>Use this page to generate input files for IMSCal<sup>1</sup> calibration from your sample data. To use IMSCal, you need a reference file and an input file. The reference file is your calibrant information (if you haven't got this yet, go to 'Process Calibrant Data'), and the input file is your data to be calibrated.</p>
-            <p>Just as for the calibration, make a folder for each sample and within that make a file for each charge state (called e.g. '1.txt', '2.txt', '1.csv', '2.csv' etc.). You can use either:</p>
+            <p>Just as for the calibration, make a folder for each sample and within that add files for each charge state. You can use either:</p>
             <ul>
                 <li><strong>Text files (.txt):</strong> Create a text file for each charge state (called 'X.txt' where X is the charge state) and paste the corresponding ATD from MassLynx into each file. Remember to set the x-axis to ms not bins!</li>
-                <li><strong>CSV files (.csv):</strong> From TWIMExtract<sup>2</sup> or similar tools, generate a CSV file for the ATD of each charge state and rename them 'X.csv' where X is the charge state. CSV files can contain comment lines starting with '#' which will be ignored.</li>
+                <li><strong>CSV files (.csv):</strong> From TWIMExtract<sup>2</sup> or similar tools - the charge state will be automatically extracted from filenames like "DT_name_range_24.txt_raw.csv" where 24 is the charge state. CSV files can contain comment lines starting with '#' which will be ignored.</li>
             </ul>
             <p>Save these files under their respective sample folder, zip the folders together, and upload below.</p>
             <p><strong>Note:</strong> This step is not doing any fitting! All it does is generate an input for IMSCal, which will then convert ATDs to CCSDs.</p>

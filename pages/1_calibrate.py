@@ -23,6 +23,7 @@ class CalibrationParams:
     calibrant_type: str
     data_type: str
     inject_time: float = 0.0
+    min_r2: float = 0.9  # Add R² threshold parameter
 
 
 @dataclass
@@ -43,6 +44,33 @@ class CalibrantProcessor:
     def _get_calibrant_column(self, calibrant_type: str) -> str:
         """Get the appropriate column name based on calibrant type."""
         return 'CCS_he' if calibrant_type.lower() == 'helium' else 'CCS_n2'
+    
+    def _is_valid_data_file(self, file_path: Path) -> bool:
+        """Check if file is a valid data file to process."""
+        if file_path.suffix.lower() == '.csv':
+            # For CSV files, check if filename contains a charge state pattern
+            filename_without_ext = file_path.stem
+            
+            import re
+            patterns = [
+                r'range_(\d+)\.txt',  # Matches "range_24.txt"
+                r'range_(\d+)_',      # Matches "range_24_"
+                r'_(\d+)\.txt_raw',   # Matches "_24.txt_raw"
+                r'_(\d+)_raw$',       # Matches "_24_raw" at end
+                r'_(\d+)$'            # Matches "_24" at end
+            ]
+            
+            # Look for a numeric part that could be a charge state
+            for pattern in patterns:
+                if re.search(pattern, filename_without_ext):
+                    return True
+            return False
+        else:
+            # For .txt files, use original method
+            return (
+                file_path.suffix == '.txt' and 
+                file_path.name[0].isdigit()
+            )
     
     def _load_data_from_file(self, file_path: Path) -> Tuple[np.ndarray, np.ndarray]:
         """Load drift time and intensity data from either txt or csv file."""
@@ -76,7 +104,7 @@ class CalibrantProcessor:
             data = np.loadtxt(file_path)
             return data[:, 0], data[:, 1]
     
-    def _process_single_file(self, file_path: Path, folder_name: str, calibrant_column: str) -> Optional[Dict[str, Any]]:
+    def _process_single_file(self, file_path: Path, folder_name: str, calibrant_column: str, min_r2: float = 0.9) -> Optional[Dict[str, Any]]:
         """Process a single data file and return result or None if failed."""
         try:
             # Load data using the appropriate method
@@ -86,10 +114,62 @@ class CalibrantProcessor:
             params, r2, fitted_values = data_tools.fit_gaussian_with_retries(drift_time, intensity)
             
             if params is None:
-                return None
+                return {
+                    'data': None,
+                    'plot': None,
+                    'skip_reason': "Gaussian fitting failed"
+                }
                 
             amp, apex, stddev = params
-            charge_state = int(file_path.stem)
+            
+            # Check R² threshold
+            if r2 < min_r2:
+                return {
+                    'data': None,
+                    'plot': (drift_time, intensity, fitted_values, file_path.name, apex, r2),
+                    'skip_reason': f"R² ({r2:.3f}) below threshold ({min_r2:.1f})"
+                }
+            
+            # Extract charge state based on file type
+            if file_path.suffix.lower() == '.csv':
+                # For CSV files from TWIMExtract, extract charge state from end of filename
+                # Example: "DT_h87023ab_july3_cyclic_2_calmyo_fn-1_#range_24.txt_raw" -> charge state is 24
+                filename_without_ext = file_path.stem  # Remove .csv extension
+                
+                # Look for pattern with charge state number
+                import re
+                # Pattern to find number after "range_" or at the end before ".txt" or "_raw"
+                patterns = [
+                    r'range_(\d+)\.txt',  # Matches "range_24.txt"
+                    r'range_(\d+)_',      # Matches "range_24_"
+                    r'_(\d+)\.txt_raw',   # Matches "_24.txt_raw"
+                    r'_(\d+)_raw$',       # Matches "_24_raw" at end
+                    r'_(\d+)$'            # Matches "_24" at end
+                ]
+                
+                charge_state = None
+                for pattern in patterns:
+                    match = re.search(pattern, filename_without_ext)
+                    if match:
+                        charge_state = int(match.group(1))
+                        break
+                
+                if charge_state is None:
+                    return {
+                        'data': None,
+                        'plot': (drift_time, intensity, fitted_values, file_path.name, apex, r2),
+                        'skip_reason': "Could not extract charge state from filename"
+                    }
+            else:
+                # For .txt files, use original method (filename starts with charge state)
+                try:
+                    charge_state = int(file_path.stem)
+                except ValueError:
+                    return {
+                        'data': None,
+                        'plot': (drift_time, intensity, fitted_values, file_path.name, apex, r2),
+                        'skip_reason': "Invalid charge state in filename"
+                    }
             
             # Look up calibrant data
             calibrant_row = self.bush_df[
@@ -98,31 +178,36 @@ class CalibrantProcessor:
             ]
             
             if calibrant_row.empty:
-                return None
+                return {
+                    'data': None,
+                    'plot': (drift_time, intensity, fitted_values, file_path.name, apex, r2),
+                    'skip_reason': f"No database entry for {folder_name} charge {charge_state}"
+                }
                 
             calibrant_value = calibrant_row[calibrant_column].values[0]
             mass = calibrant_row['mass'].values[0]
             
             if pd.isna(calibrant_value):
-                return None
+                return {
+                    'data': None,
+                    'plot': (drift_time, intensity, fitted_values, file_path.name, apex, r2),
+                    'skip_reason': f"No {calibrant_column} value available in database"
+                }
                 
             return {
                 'data': [folder_name, mass, charge_state, apex, r2, calibrant_value],
-                'plot': (drift_time, intensity, fitted_values, file_path.name, apex, r2)
+                'plot': (drift_time, intensity, fitted_values, file_path.name, apex, r2),
+                'skip_reason': None
             }
             
         except Exception as e:
-            st.error(f"Error processing {file_path}: {str(e)}")
-            return None
-    
-    def _is_valid_data_file(self, file_path: Path) -> bool:
-        """Check if file is a valid data file to process."""
-        return (
-            file_path.suffix in ['.txt', '.csv'] and 
-            file_path.name[0].isdigit()
-        )
-    
-    def process_folder(self, folder_name: str, folder_path: Path, calibrant_type: str) -> ProcessingResult:
+            return {
+                'data': None,
+                'plot': None,
+                'skip_reason': f"Processing error: {str(e)}"
+            }
+
+    def process_folder(self, folder_name: str, folder_path: Path, calibrant_type: str, min_r2: float = 0.9) -> ProcessingResult:
         """Process all files in a folder and return results."""
         calibrant_column = self._get_calibrant_column(calibrant_type)
         
@@ -134,17 +219,38 @@ class CalibrantProcessor:
             if not self._is_valid_data_file(file_path):
                 continue
                 
-            result = self._process_single_file(file_path, folder_name, calibrant_column)
+            result = self._process_single_file(file_path, folder_name, calibrant_column, min_r2)
             
             if result:
-                results.append(result['data'])
-                plots.append(result['plot'])
-            else:
-                charge_state = file_path.stem
-                skipped_entries.append(
-                    f"{folder_name} charge {charge_state} - "
-                    f"Processing failed or no {calibrant_type.lower()} CCS value available"
-                )
+                if result['data'] is not None:
+                    results.append(result['data'])
+                    plots.append(result['plot'])
+                else:
+                    # File was processed but skipped for a reason
+                    if file_path.suffix.lower() == '.csv':
+                        # Try to extract charge state for display
+                        import re
+                        patterns = [
+                            r'range_(\d+)\.txt',
+                            r'range_(\d+)_',
+                            r'_(\d+)\.txt_raw',
+                            r'_(\d+)_raw$',
+                            r'_(\d+)$'
+                        ]
+                        charge_state = "unknown"
+                        for pattern in patterns:
+                            match = re.search(pattern, file_path.stem)
+                            if match:
+                                charge_state = match.group(1)
+                                break
+                    else:
+                        charge_state = file_path.stem
+                    
+                    skipped_entries.append(f"{folder_name} charge {charge_state} - {result['skip_reason']}")
+                    
+                    # Still add the plot if it exists (for visualization of poor fits)
+                    if result['plot'] is not None:
+                        plots.append(result['plot'])
         
         results_df = pd.DataFrame(results, columns=self.REQUIRED_COLUMNS)
         return ProcessingResult(results_df, plots, skipped_entries)
@@ -181,7 +287,10 @@ class ResultsDisplayer:
             plt.subplot(n_rows, n_cols, i + 1)
             plt.plot(drift_time, intensity, 'b.', label='Raw Data', markersize=3)
             plt.plot(drift_time, fitted_values, 'r-', label='Gaussian Fit', linewidth=1)
-            plt.title(f'{filename}\nApex: {apex:.2f}, R²: {r2:.3f}')
+            
+            # Color code the title based on R² value
+            title_color = 'red' if r2 < 0.9 else 'black'
+            plt.title(f'{filename}\nApex: {apex:.2f}, R²: {r2:.3f}', color=title_color)
             plt.xlabel('Drift Time')
             plt.ylabel('Intensity')
             plt.legend()
@@ -196,13 +305,12 @@ class ResultsDisplayer:
         if not skipped_entries:
             return
             
-        st.markdown('<div class="section-divider">', unsafe_allow_html=True)
         st.markdown('<h3 class="section-header">⚠️ Skipped Entries</h3>', unsafe_allow_html=True)
         st.markdown('<div class="warning-card">', unsafe_allow_html=True)
         st.write("The following entries were skipped:")
         for entry in skipped_entries:
             st.write(f"• {entry}")
-        st.markdown('</div></div>', unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
 
 
 class FileGenerator:
@@ -300,12 +408,10 @@ class UIComponents:
         
         st.markdown('<h3 class="section-header">Calibrant Folder Naming</h3>', unsafe_allow_html=True)
         st.table(df)
-        st.markdown('</div>', unsafe_allow_html=True)
     
     @staticmethod
     def get_calibration_parameters() -> CalibrationParams:
         """Get calibration parameters from user input."""
-        st.markdown('<div class="section-divider">', unsafe_allow_html=True)
         st.markdown('<h3 class="section-header">⚗️ Calibration Parameters</h3>', unsafe_allow_html=True)
         st.markdown(
             'Most of the time you should calibrate with calibrant values obtained for the same '
@@ -315,6 +421,17 @@ class UIComponents:
         calibrant_type = st.selectbox(
             "Which values from the Bush database would you like to calibrate with?",
             options=["Helium", "Nitrogen"]
+        )
+        
+        # R² threshold setting
+        st.markdown("**Quality Control Settings**")
+        min_r2 = st.number_input(
+            "Minimum R² value for inclusion (entries below this will be skipped)",
+            min_value=0.0,
+            max_value=1.0,
+            value=0.9,
+            step=0.05,
+            help="Default is 0.9. Gaussian fits with R² below this threshold will be excluded from results but still shown in plots (in red)."
         )
         
         col1, col2 = st.columns(2)
@@ -338,8 +455,6 @@ class UIComponents:
         if data_type.lower() == "cyclic":
             inject_time = st.number_input("Enter inject time (ms)", min_value=0.0, value=0.0)
         
-        st.markdown('</div>', unsafe_allow_html=True)
-        
         return CalibrationParams(
             velocity=velocity,
             voltage=voltage,
@@ -347,7 +462,8 @@ class UIComponents:
             length=length,
             calibrant_type=calibrant_type,
             data_type=data_type,
-            inject_time=inject_time
+            inject_time=inject_time,
+            min_r2=min_r2
         )
 
 
@@ -374,6 +490,7 @@ def main():
             <li><strong>CSV files (.csv):</strong> From TWIMExtract<sup>2</sup> or similar tools, generate a CSV file for the ATD of each charge state and rename them 'X.csv' where X is the charge state. CSV files can contain comment lines starting with '#' which will be ignored.</li>
         </ul>
         <p>Save these files under their respective protein folder, zip the protein folders together, and upload below.</p>
+        <p><strong>Quality Control:</strong> By default, entries with R² < 0.9 are excluded from results but shown in plots (colored red) for manual inspection. This threshold can be adjusted in the parameters section.</p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -423,7 +540,6 @@ def main():
         all_plots = []
         all_skipped = []
 
-        st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
         st.markdown('<h3 class="section-header">🔬 Processing Results</h3>', unsafe_allow_html=True)
 
         for folder in folders:
@@ -432,13 +548,11 @@ def main():
                 unsafe_allow_html=True
             )
             folder_path = Path(temp_dir) / folder
-            result = processor.process_folder(folder, folder_path, params.calibrant_type)
+            result = processor.process_folder(folder, folder_path, params.calibrant_type, params.min_r2)
 
             all_results.append(result.results_df)
             all_plots.extend(result.plots)
             all_skipped.extend(result.skipped_entries)
-
-        st.markdown('</div>', unsafe_allow_html=True)
 
         combined_results = pd.concat(all_results, ignore_index=True) if all_results else pd.DataFrame()
 

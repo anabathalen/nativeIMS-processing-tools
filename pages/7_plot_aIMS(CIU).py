@@ -96,8 +96,6 @@ class HeatmapSettings:
     stacked_fill_alpha: float = 0.3
     stacked_show_labels: bool = True
     stacked_label_frequency: int = 1
-    stacked_normalize_individual: bool = True
-    stacked_baseline_correction: bool = False
     stacked_line_color_mode: str = 'gradient'
     stacked_single_color: str = '#1f77b4'
     show_grid: bool = False
@@ -277,7 +275,7 @@ class CIUVisualization:
     
     @staticmethod
     def normalize_2D_origami(inputData: np.ndarray, mode: str = 'Maximum') -> np.ndarray:
-        """EXACT copy of ORIGAMI's normalize_2D function"""
+        """EXACT copy of ORIGAMI's normalize_2D function - no debug output"""
         inputData = np.nan_to_num(inputData)
         
         if mode == "Maximum":
@@ -296,7 +294,7 @@ class CIUVisualization:
         return normData
     
     def create_interpolation_grid_origami(self, data: np.ndarray, settings: HeatmapSettings) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Create interpolated intensity grid EXACTLY like ORIGAMI"""
+        """Create interpolated intensity grid EXACTLY like ORIGAMI - ALWAYS NORMALIZED"""
         filtered_data = self.filter_data_by_range(data, settings)
         
         grid_x = np.linspace(settings.x_min, settings.x_max, num=settings.grid_resolution)
@@ -313,8 +311,8 @@ class CIUVisualization:
         
         Z = np.nan_to_num(Z, nan=0.0)
         
-        if settings.normalize_data:
-            Z = self.normalize_2D_origami(Z, mode='Maximum')
+        # ALWAYS apply ORIGAMI normalization
+        Z = self.normalize_2D_origami(Z, mode='Maximum')
         
         return X, Y, Z, filtered_data
     
@@ -434,7 +432,7 @@ class CIUVisualization:
         return dataOut
     
     def apply_smoothing_origami(self, Z: np.ndarray, settings: HeatmapSettings) -> np.ndarray:
-        """Apply ORIGAMI-style smoothing options"""
+        """Apply ORIGAMI-style smoothing options - NO ADDITIONAL PREPROCESSING"""
         if not settings.apply_smoothing:
             return Z
         
@@ -454,10 +452,11 @@ class CIUVisualization:
         return Z_smooth
     
     def create_stacked_ccsd_plot_origami(self, data: np.ndarray, settings: HeatmapSettings) -> Tuple[plt.Figure, np.ndarray]:
-        """Create stacked CCSD plot - FIXED to use actual CV values"""
+        """Create stacked CCSD plot - FIXED Y-axis offset calculation"""
         X, Y, Z, filtered_data = self.create_interpolation_grid_origami(data, settings)
         Z = self.apply_smoothing_origami(Z, settings)
         
+        # Get actual CV values from data (ORIGAMI approach)
         actual_cv_values = np.unique(filtered_data[:, 2])
         actual_cv_values = actual_cv_values[(actual_cv_values >= settings.x_min) & 
                                           (actual_cv_values <= settings.x_max)]
@@ -468,11 +467,31 @@ class CIUVisualization:
         fig, ax = plt.subplots(figsize=(settings.figure_size, settings.figure_size * 0.75), dpi=settings.dpi)
         fig.patch.set_facecolor('white')
         
+        # Select CVs to plot based on frequency
         cv_step = settings.stacked_label_frequency
         cv_indices_to_plot = range(0, len(actual_cv_values), cv_step)
         selected_cvs = [actual_cv_values[i] for i in cv_indices_to_plot]
         n_traces = len(selected_cvs)
         
+        # Calculate base trace height (height of one normalized trace)
+        ccs_range = settings.y_max - settings.y_min
+        base_trace_height = ccs_range / 10  # Default height for one trace
+        
+        # Calculate Y-axis offset based on user input
+        if settings.stacked_offset_mode == 'auto':
+            # ORIGAMI auto: space traces evenly across the range
+            vertical_spacing = ccs_range / max(1, n_traces) if n_traces > 0 else ccs_range * 0.1
+        elif settings.stacked_offset_mode == 'percentage':
+            # Percentage of the base trace height
+            vertical_spacing = base_trace_height * (settings.stacked_offset_value / 100)
+        else:  # manual
+            # Direct multiplier of base trace height
+            # If user sets 0.5, next trace appears halfway up the previous one
+            vertical_spacing = base_trace_height * settings.stacked_offset_value
+
+        # Each trace height is always the base height regardless of offset
+        max_trace_height = base_trace_height
+
         # Generate colors
         if settings.stacked_line_color_mode == 'single':
             colors = [settings.stacked_single_color] * n_traces
@@ -486,19 +505,14 @@ class CIUVisualization:
             cb_colors = sns.color_palette("colorblind", n_colors=min(n_traces, 10))
             colors = [cb_colors[i % len(cb_colors)] for i in range(n_traces)]
         
-        max_intensity = np.max(Z) if np.max(Z) > 0 else 1.0
-        
-        if settings.stacked_offset_mode == 'auto':
-            vertical_spacing = max_intensity * 1.2
-        elif settings.stacked_offset_mode == 'percentage':
-            vertical_spacing = max_intensity * (settings.stacked_offset_value / 100)
-        else:  # manual
-            vertical_spacing = settings.stacked_offset_value
-        
         y_tick_positions = []
         y_tick_labels = []
         
+        # Start from bottom of CCS range and stack upward
+        y_start = settings.y_min
+        
         for plot_index, cv_value in enumerate(selected_cvs):
+            # Find corresponding intensity data
             grid_cv_values = np.linspace(settings.x_min, settings.x_max, num=settings.grid_resolution)
             closest_grid_idx = np.argmin(np.abs(grid_cv_values - cv_value))
             
@@ -507,16 +521,15 @@ class CIUVisualization:
             if np.max(intensity_data) <= 0:
                 continue
             
-            if settings.stacked_normalize_individual and np.max(intensity_data) > 0:
-                intensity_data = intensity_data / np.max(intensity_data)
+            # REMOVED: Individual trace normalization and baseline correction
+            # Data is already normalized by ORIGAMI at the grid level
             
-            if settings.stacked_baseline_correction:
-                baseline = np.min(intensity_data)
-                intensity_data = intensity_data - baseline
-                intensity_data = np.maximum(intensity_data, 0)
+            # Y-axis positioning - each trace moves up by vertical_spacing
+            base_y_position = y_start + (plot_index * vertical_spacing)
             
-            base_y_position = cv_value
-            scaled_intensity = intensity_data * vertical_spacing * 0.6
+            # Scale intensities to consistent height (they're already 0-1 normalized)
+            scaled_intensity = intensity_data * max_trace_height
+            
             y_coordinates = base_y_position + scaled_intensity
             baseline_y = np.full_like(ccs_values, base_y_position)
             
@@ -533,22 +546,34 @@ class CIUVisualization:
             y_tick_positions.append(base_y_position)
             y_tick_labels.append(f"{cv_value:.0f}")
         
-        # Configure plot appearance
+        # ORIGAMI axis configuration - FIXED CV label handling
         ax.set_xlabel("CCS (Å²)", fontsize=settings.font_size, fontweight='normal', color='black')
-        ax.set_ylabel("Collision Voltage (V)", fontsize=settings.font_size, fontweight='normal', color='black')
-        ax.set_xlim(settings.y_min, settings.y_max)
         
+        # Y-axis label depends on whether CV labels are shown
+        if settings.stacked_show_labels:
+            ax.set_ylabel("Collision Voltage (V)", fontsize=settings.font_size, fontweight='normal', color='black')
+        else:
+            ax.set_ylabel("Normalised Intensity", fontsize=settings.font_size, fontweight='normal', color='black')
+        
+        ax.set_xlim(settings.y_min, settings.y_max)  # CCS range on X-axis
+        
+        # Y-axis limits - show all traces with some padding
         if y_tick_positions:
-            cv_range = max(y_tick_positions) - min(y_tick_positions)
-            padding = cv_range * 0.15
-            
-            y_min_plot = min(y_tick_positions) - padding
-            y_max_plot = max(y_tick_positions) + padding + vertical_spacing * 0.8
+            y_min_plot = min(y_tick_positions) - vertical_spacing * 0.1
+            y_max_plot = max(y_tick_positions) + max_trace_height + vertical_spacing * 0.1
             
             ax.set_ylim(y_min_plot, y_max_plot)
-            ax.set_yticks(y_tick_positions)
-            ax.set_yticklabels(y_tick_labels)
-        
+            
+            # FIXED: Properly handle CV labels checkbox
+            if settings.stacked_show_labels:
+                ax.set_yticks(y_tick_positions)
+                ax.set_yticklabels(y_tick_labels)
+            else:
+                # Remove all Y-axis ticks and labels when CV labels are disabled
+                ax.set_yticks([])
+                ax.set_yticklabels([])
+
+        # ORIGAMI styling
         for spine_name in ['top', 'right', 'left', 'bottom']:
             ax.spines[spine_name].set_visible(True)
             ax.spines[spine_name].set_color('black')
@@ -710,11 +735,12 @@ class CIUInterface:
                 interpolation_method = st.selectbox("Method", ["cubic", "linear", "nearest"])
                 grid_resolution = st.number_input("Grid Resolution", min_value=50, max_value=500, value=200, step=10)
                 
-                st.subheader("Normalization")
-                normalize_data = st.checkbox("ORIGAMI-style normalization (each CV column max = 1)", value=True)
+                st.info("✅ ORIGAMI normalization always applied (each CV column max = 1)")
                 
                 settings_dict.update({
-                    'interpolation_method': interpolation_method, 'grid_resolution': grid_resolution, 'normalize_data': normalize_data
+                    'interpolation_method': interpolation_method, 
+                    'grid_resolution': grid_resolution, 
+                    'normalize_data': True  # Always True
                 })
             
             with col2:
@@ -761,52 +787,80 @@ class CIUInterface:
                 col1, col2 = st.columns(2)
                 
                 with col1:
-                    st.subheader("Offset Settings")
-                    stacked_offset_mode = st.selectbox("Offset Mode", ["auto", "manual", "percentage"],
-                                                     help="How to calculate vertical spacing between traces")
-                    
+                    st.subheader("Trace Selection")
+                    stacked_label_frequency = st.number_input("Trace Frequency", 
+                                                min_value=1, max_value=20, value=1, step=1,
+                                                help="Show every Nth trace (1 = all traces, 2 = every other trace, etc.)")
+
+                    st.subheader("Y-axis Offset Settings")
+                    stacked_offset_mode = st.selectbox("Offset Mode", 
+                     ["auto", "percentage", "manual"],
+                     help="auto: even spacing, percentage: % of trace height, manual: multiplier of trace height")
+
                     stacked_offset_value = 1.0
                     if stacked_offset_mode == "manual":
-                        stacked_offset_value = st.number_input("Offset Value", min_value=0.1, max_value=10.0, value=1.0, step=0.1)
+                        stacked_offset_value = st.number_input("Offset Multiplier", 
+                         min_value=0.1, max_value=5.0, value=1.0, step=0.1,
+                         help="Multiplier of trace height (0.5 = halfway overlap, 1.0 = no overlap, 2.0 = double spacing)")
                     elif stacked_offset_mode == "percentage":
-                        stacked_offset_value = st.number_input("Offset Percentage", min_value=10, max_value=500, value=120, step=10)
-                    
+                        stacked_offset_value = st.number_input("Offset Percentage", 
+                         min_value=10.0, max_value=500.0, value=100.0, step=10.0,
+                         help="Percentage of trace height (50% = halfway overlap, 100% = no overlap)")
+                    else:  # auto
+                        st.info("Auto mode: traces evenly spaced across Y-axis range")
+
+                with col2:
                     st.subheader("Trace Appearance")
                     stacked_line_width = st.number_input("Line Width", min_value=0.5, max_value=5.0, value=1.5, step=0.1)
                     stacked_fill_alpha = st.number_input("Fill Transparency", min_value=0.0, max_value=1.0, value=0.3, step=0.05)
-                    
-                with col2:
-                    st.subheader("Line Colors")
-                    stacked_line_color_mode = st.selectbox("Line Color Mode", 
-                                                         ["gradient", "single", "colorblind_cycle"],
-                                                         help="How to color the traces")
-                    
-                    stacked_single_color = '#1f77b4'
+
+                    st.subheader("Color Settings")
+                    stacked_line_color_mode = st.selectbox("Color Mode", 
+                                             ["gradient", "single", "colorblind_cycle"],
+                                             help="gradient: color map, single: one color, colorblind_cycle: distinct colors")
+
+                    stacked_single_color = '#1f77b4'  # Default blue
                     if stacked_line_color_mode == "single":
-                        stacked_single_color = st.color_picker("Line Color", value='#1f77b4')
+                        stacked_single_color = st.color_picker("Single Color", value='#1f77b4')
+                    elif stacked_line_color_mode == "gradient":
+                        st.info("Gradient colors will use the selected colormap from Appearance tab")
+                    else:  # colorblind_cycle
+                        st.info("Using colorblind-friendly color cycle")
+
+                    st.subheader("Labels")
+                    stacked_show_labels = st.checkbox("Show CV labels on Y-axis", value=True)
                     
-                    st.subheader("Labels & Frequency")
-                    stacked_show_labels = st.checkbox("Show CV Labels", value=True)
-                    stacked_label_frequency = st.number_input("Show Every Nth CV", min_value=1, max_value=20, value=1, step=1,
-                                                            help="1 = show all, 2 = show every 2nd, etc.")
-                    
-                    st.subheader("Data Processing")
-                    stacked_normalize_individual = st.checkbox("Normalize Each Trace", value=True,
-                                                             help="Normalize each CV trace to max=1 independently")
-                    stacked_baseline_correction = st.checkbox("Baseline Correction", value=False,
-                                                            help="Subtract minimum value from each trace")
-                
-                settings_dict.update({
-                    'stacked_offset_mode': stacked_offset_mode, 'stacked_offset_value': stacked_offset_value,
-                    'stacked_line_width': stacked_line_width, 'stacked_fill_alpha': stacked_fill_alpha,
-                    'stacked_line_color_mode': stacked_line_color_mode, 'stacked_single_color': stacked_single_color,
-                    'stacked_show_labels': stacked_show_labels, 'stacked_label_frequency': stacked_label_frequency,
-                    'stacked_normalize_individual': stacked_normalize_individual, 'stacked_baseline_correction': stacked_baseline_correction
-                })
-            
+                    # Add info about automatic normalization
+                    st.info("✅ ORIGAMI grid normalization automatically applied to all traces")
+
+            # Update settings_dict to remove the normalization settings:
+            settings_dict.update({
+                'stacked_label_frequency': stacked_label_frequency,
+                'stacked_offset_mode': stacked_offset_mode,
+                'stacked_offset_value': stacked_offset_value,
+                'stacked_line_width': stacked_line_width,
+                'stacked_fill_alpha': stacked_fill_alpha,
+                'stacked_line_color_mode': stacked_line_color_mode,
+                'stacked_single_color': stacked_single_color,
+                'stacked_show_labels': stacked_show_labels
+                # REMOVED: stacked_normalize_individual and stacked_baseline_correction
+            })
+
             axis_tab = tab4
             annotation_tab = tab5
         else:
+            # Set default values for stacked settings when not in stacked mode
+            settings_dict.update({
+                'stacked_label_frequency': 1,
+                'stacked_offset_mode': 'auto',
+                'stacked_offset_value': 1.0,
+                'stacked_line_width': 1.5,
+                'stacked_fill_alpha': 0.3,
+                'stacked_line_color_mode': 'gradient',
+                'stacked_single_color': '#1f77b4',
+                'stacked_show_labels': True
+                # REMOVED: stacked_normalize_individual and stacked_baseline_correction defaults
+            })
             axis_tab = tab3
             annotation_tab = tab4
         
@@ -997,6 +1051,7 @@ def main():
         st.subheader("📊 Visualization Settings")
         heatmap_settings, plot_type = interface.get_heatmap_settings(data_range)
         
+        # REMOVE any diagnostic calls here - go straight to visualization
         button_text = "🎨 Generate Stacked CCSDs" if plot_type == "stacked" else "🎨 Generate CIU Heatmap"
         if st.button(button_text, type="primary", use_container_width=True):
             try:
