@@ -294,7 +294,7 @@ class CIUVisualization:
         return normData
     
     def create_interpolation_grid_origami(self, data: np.ndarray, settings: HeatmapSettings) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Create interpolated intensity grid EXACTLY like ORIGAMI - ALWAYS NORMALIZED"""
+        """Create interpolated intensity grid EXACTLY like ORIGAMI - conditional normalization"""
         filtered_data = self.filter_data_by_range(data, settings)
         
         grid_x = np.linspace(settings.x_min, settings.x_max, num=settings.grid_resolution)
@@ -311,11 +311,35 @@ class CIUVisualization:
         
         Z = np.nan_to_num(Z, nan=0.0)
         
-        # ALWAYS apply ORIGAMI normalization
-        Z = self.normalize_2D_origami(Z, mode='Maximum')
+        # Apply ORIGAMI normalization only if requested
+        if settings.normalize_data:
+            Z = self.normalize_2D_origami(Z, mode='Maximum')
         
         return X, Y, Z, filtered_data
     
+    def create_interpolation_grid_origami_stacked(self, data: np.ndarray, settings: HeatmapSettings) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Create interpolated intensity grid for stacked plots - ALWAYS NORMALIZED"""
+        filtered_data = self.filter_data_by_range(data, settings)
+        
+        grid_x = np.linspace(settings.x_min, settings.x_max, num=settings.grid_resolution)
+        grid_y = np.linspace(settings.y_min, settings.y_max, num=settings.grid_resolution)
+        X, Y = np.meshgrid(grid_x, grid_y)
+        
+        Z = griddata(
+            (filtered_data[:, 2], filtered_data[:, 0]),
+            filtered_data[:, 3],
+            (X, Y),
+            method=settings.interpolation_method,
+            fill_value=0
+        )
+        
+        Z = np.nan_to_num(Z, nan=0.0)
+        
+        # ALWAYS apply ORIGAMI normalization for stacked plots
+        Z = self.normalize_2D_origami(Z, mode='Maximum')
+        
+        return X, Y, Z, filtered_data
+
     def _setup_plot_appearance(self, ax, settings: HeatmapSettings) -> None:
         """Configure plot styling and appearance"""
         ax.set_xlabel("Collision Voltage (V)", fontsize=settings.font_size, 
@@ -453,7 +477,7 @@ class CIUVisualization:
     
     def create_stacked_ccsd_plot_origami(self, data: np.ndarray, settings: HeatmapSettings) -> Tuple[plt.Figure, np.ndarray]:
         """Create stacked CCSD plot - FIXED Y-axis offset calculation"""
-        X, Y, Z, filtered_data = self.create_interpolation_grid_origami(data, settings)
+        X, Y, Z, filtered_data = self.create_interpolation_grid_origami_stacked(data, settings)
         Z = self.apply_smoothing_origami(Z, settings)
         
         # Get actual CV values from data (ORIGAMI approach)
@@ -735,12 +759,23 @@ class CIUInterface:
                 interpolation_method = st.selectbox("Method", ["cubic", "linear", "nearest"])
                 grid_resolution = st.number_input("Grid Resolution", min_value=50, max_value=500, value=200, step=10)
                 
-                st.info("✅ ORIGAMI normalization always applied (each CV column max = 1)")
+                if plot_type == "Heatmap":
+                    # ORIGAMI-style normalization option for heatmaps only
+                    normalize_data = st.checkbox("Normalize data (ORIGAMI-style)", value=True, 
+                                                help="Apply ORIGAMI Maximum normalization to each CV column")
+                    if normalize_data:
+                        st.info("✅ ORIGAMI normalization: each CV column max = 1")
+                    else:
+                        st.info("ℹ️ Raw intensity values preserved")
+                else:
+                    # Stacked plots always normalized
+                    normalize_data = True
+                    st.info("✅ ORIGAMI normalization always applied for stacked plots")
                 
                 settings_dict.update({
                     'interpolation_method': interpolation_method, 
                     'grid_resolution': grid_resolution, 
-                    'normalize_data': True  # Always True
+                    'normalize_data': normalize_data
                 })
             
             with col2:
