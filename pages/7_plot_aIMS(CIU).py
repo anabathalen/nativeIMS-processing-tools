@@ -202,31 +202,33 @@ class CIUDataProcessor:
         return lookup
     
     def calibrate_data(self, twim_df: pd.DataFrame, cal_data: pd.DataFrame) -> np.ndarray:
-        """Calibrate TWIM data using cached calibration lookup"""
-        # Create hash for caching
-        cal_hash = hashlib.md5(cal_data.to_string().encode()).hexdigest()
-        cal_pickle = pickle.dumps(cal_data)
-        
-        lookup = self._get_calibration_lookup(cal_hash, cal_pickle)
+        """Calibrate TWIM data using linear interpolation between calibration points"""
         calibrated_data = []
         
         drift_times = twim_df["Drift Time"]
         collision_voltages = twim_df.columns[1:]
+        
+        # Sort calibration data by drift time for interpolation
         cal_data_sorted = cal_data.sort_values("Drift (ms)")
+        cal_drift_times = cal_data_sorted["Drift (ms)"].values
+        cal_ccs_values = cal_data_sorted["CCS"].values
         
         for idx, drift_time in enumerate(drift_times):
             if pd.isna(drift_time):
                 continue
             
             intensities = twim_df.iloc[idx, 1:].values
-            drift_time_rounded = round(drift_time, 4)
             
-            # Use cached lookup first, fallback to closest search
-            if drift_time_rounded in lookup:
-                ccs_value = lookup[drift_time_rounded]
+            # Use numpy's linear interpolation between calibration points
+            if drift_time <= cal_drift_times.min():
+                # Extrapolate using first calibration point
+                ccs_value = cal_ccs_values[0]
+            elif drift_time >= cal_drift_times.max():
+                # Extrapolate using last calibration point
+                ccs_value = cal_ccs_values[-1]
             else:
-                closest_idx = (cal_data_sorted["Drift (ms)"] - drift_time_rounded).abs().idxmin()
-                ccs_value = cal_data_sorted.loc[closest_idx, "CCS"]
+                # Linear interpolation between the two nearest calibration points
+                ccs_value = np.interp(drift_time, cal_drift_times, cal_ccs_values)
             
             for col_idx, intensity in enumerate(intensities):
                 if not pd.isna(intensity) and intensity > 0:
