@@ -202,8 +202,8 @@ class CIUDataProcessor:
             lookup[drift_rounded] = row["CCS"]
         return lookup
     
-    def calibrate_data(self, twim_df: pd.DataFrame, cal_data: pd.DataFrame) -> np.ndarray:
-        """Calibrate TWIM data using linear interpolation between calibration points"""
+    def calibrate_data(self, twim_df: pd.DataFrame, cal_data: pd.DataFrame, inject_time: float = 0.0) -> np.ndarray:
+        """Calibrate TWIM data - subtract inject time from each drift time, then interpolate CCS"""
         calibrated_data = []
         
         drift_times = twim_df["Drift Time"]
@@ -218,25 +218,29 @@ class CIUDataProcessor:
             if pd.isna(drift_time):
                 continue
             
+            # Step 1: Convert drift time to milliseconds and subtract inject time
+            corrected_drift_time = drift_time - inject_time
+            
             intensities = twim_df.iloc[idx, 1:].values
             
-            # Use numpy's linear interpolation between calibration points
-            if drift_time <= cal_drift_times.min():
+            # Step 2: Look up corresponding CCS value using linear interpolation
+            if corrected_drift_time <= cal_drift_times.min():
                 # Extrapolate using first calibration point
                 ccs_value = cal_ccs_values[0]
-            elif drift_time >= cal_drift_times.max():
+            elif corrected_drift_time >= cal_drift_times.max():
                 # Extrapolate using last calibration point
                 ccs_value = cal_ccs_values[-1]
             else:
                 # Linear interpolation between the two nearest calibration points
-                ccs_value = np.interp(drift_time, cal_drift_times, cal_ccs_values)
+                ccs_value = np.interp(corrected_drift_time, cal_drift_times, cal_ccs_values)
             
+            # Step 3: Create calibrated data points for each CV
             for col_idx, intensity in enumerate(intensities):
                 if not pd.isna(intensity) and intensity > 0:
                     cv = collision_voltages[col_idx]
                     try:
                         cv_float = float(cv)
-                        calibrated_data.append([ccs_value, drift_time, cv_float, intensity])
+                        calibrated_data.append([ccs_value, corrected_drift_time, cv_float, intensity])
                     except (ValueError, TypeError):
                         continue
         
@@ -1061,7 +1065,10 @@ def main():
                         )
                         
                         twim_df = processor.apply_drift_correction(twim_df, processing_settings)
-                        calibrated_array = processor.calibrate_data(twim_df, cal_data)
+                        
+                        # Pass inject_time to calibration
+                        inject_time = processing_settings.inject_time if processing_settings.inject_time is not None else 0.0
+                        calibrated_array = processor.calibrate_data(twim_df, cal_data, inject_time)
                         
                         st.session_state["calibrated_array"] = calibrated_array
                         st.session_state["processing_settings"] = processing_settings
