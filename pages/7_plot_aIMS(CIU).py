@@ -160,7 +160,7 @@ class CIUDataProcessor:
     
     @staticmethod
     def load_calibration_data(file, charge_state: int) -> pd.DataFrame:
-        """Load calibration data - ORIGAMI style (no std dev filtering)"""
+        """Load calibration data - subtract 12ms from drift times before conversion"""
         try:
             cal_df = pd.read_csv(file)
             cal_data = cal_df[cal_df["Z"] == charge_state].copy()
@@ -173,7 +173,8 @@ class CIUDataProcessor:
             if missing_cols:
                 raise ValueError(f"Calibration data missing required columns: {missing_cols}")
             
-            cal_data["Drift (ms)"] = cal_data["Drift"] * 1000
+            # Subtract 12ms before converting to milliseconds
+            cal_data["Drift (ms)"] = (cal_data["Drift"] - 0.012) * 1000
             return cal_data
             
         except Exception as e:
