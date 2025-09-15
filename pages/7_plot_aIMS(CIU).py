@@ -347,8 +347,20 @@ class CIUVisualization:
         
         return X, Y, Z, filtered_data
 
+    def _add_colorbar(self, fig, ax, c, settings: HeatmapSettings) -> None:
+        """Add colorbar to the plot with proper units"""
+        if not settings.show_colorbar:
+            return
+            
+        cbar = plt.colorbar(c, ax=ax, shrink=settings.colorbar_shrink, 
+                          aspect=settings.colorbar_aspect)
+        intensity_label = "Normalized Intensity" if settings.normalize_data else "Intensity"
+        cbar.set_label(intensity_label, fontsize=settings.font_size, 
+                      fontweight='normal', color='black')
+        cbar.ax.tick_params(labelsize=settings.font_size * 0.9, colors='black')
+
     def _setup_plot_appearance(self, ax, settings: HeatmapSettings) -> None:
-        """Configure plot styling and appearance"""
+        """Configure plot styling and appearance with proper units"""
         ax.set_xlabel("Collision Voltage (V)", fontsize=settings.font_size, 
                      fontweight='normal', color='black')
         ax.set_ylabel("CCS (Å²)", fontsize=settings.font_size, 
@@ -360,18 +372,6 @@ class CIUVisualization:
             spine.set_linewidth(1.5)
         
         ax.set_facecolor('white')
-    
-    def _add_colorbar(self, fig, ax, c, settings: HeatmapSettings) -> None:
-        """Add colorbar to the plot"""
-        if not settings.show_colorbar:
-            return
-            
-        cbar = plt.colorbar(c, ax=ax, shrink=settings.colorbar_shrink, 
-                          aspect=settings.colorbar_aspect)
-        intensity_label = "Normalized Intensity" if settings.normalize_data else "Intensity"
-        cbar.set_label(intensity_label, fontsize=settings.font_size, 
-                      fontweight='normal', color='black')
-        cbar.ax.tick_params(labelsize=settings.font_size * 0.9, colors='black')
     
     def _add_reference_lines(self, ax, settings: HeatmapSettings):
         """Add reference lines with labels positioned to the right"""
@@ -483,7 +483,7 @@ class CIUVisualization:
         return Z_smooth
     
     def create_stacked_ccsd_plot_origami(self, data: np.ndarray, settings: HeatmapSettings) -> Tuple[plt.Figure, np.ndarray]:
-        """Create stacked CCSD plot - FIXED Y-axis offset calculation"""
+        """Create stacked CCSD plot - FIXED Y-axis sizing and trace height"""
         X, Y, Z, filtered_data = self.create_interpolation_grid_origami_stacked(data, settings)
         Z = self.apply_smoothing_origami(Z, settings)
         
@@ -495,7 +495,8 @@ class CIUVisualization:
         
         ccs_values = np.linspace(settings.y_min, settings.y_max, num=settings.grid_resolution)
         
-        fig, ax = plt.subplots(figsize=(settings.figure_size, settings.figure_size * 0.75), dpi=settings.dpi)
+        # FIXED: Better aspect ratio for stacked plots
+        fig, ax = plt.subplots(figsize=(settings.figure_size, settings.figure_size * 1.2), dpi=settings.dpi)
         fig.patch.set_facecolor('white')
         
         # Select CVs to plot based on frequency
@@ -504,24 +505,33 @@ class CIUVisualization:
         selected_cvs = [actual_cv_values[i] for i in cv_indices_to_plot]
         n_traces = len(selected_cvs)
         
-        # Calculate base trace height (height of one normalized trace)
-        ccs_range = settings.y_max - settings.y_min
-        base_trace_height = ccs_range / 10  # Default height for one trace
+        if n_traces == 0:
+            raise ValueError("No traces to plot in the selected range")
         
-        # Calculate Y-axis offset based on user input
+        # FIXED: Better calculation of trace dimensions
+        ccs_range = settings.y_max - settings.y_min
+        
+        # Calculate vertical spacing first
         if settings.stacked_offset_mode == 'auto':
-            # ORIGAMI auto: space traces evenly across the range
-            vertical_spacing = ccs_range / max(1, n_traces) if n_traces > 0 else ccs_range * 0.1
+            # Auto mode: distribute traces evenly with some padding
+            total_plot_height = ccs_range * 3  # Give more vertical space
+            vertical_spacing = total_plot_height / max(1, n_traces + 1)  # +1 for padding
         elif settings.stacked_offset_mode == 'percentage':
-            # Percentage of the base trace height
+            # Base trace height as percentage of CCS range
+            base_trace_height = ccs_range * 0.15  # 15% of CCS range
             vertical_spacing = base_trace_height * (settings.stacked_offset_value / 100)
         else:  # manual
-            # Direct multiplier of base trace height
-            # If user sets 0.5, next trace appears halfway up the previous one
+            # Base trace height as percentage of CCS range
+            base_trace_height = ccs_range * 0.15  # 15% of CCS range
             vertical_spacing = base_trace_height * settings.stacked_offset_value
-
-        # Each trace height is always the base height regardless of offset
-        max_trace_height = base_trace_height
+        
+        # FIXED: Trace height should be substantial and independent of spacing
+        if settings.stacked_offset_mode == 'auto':
+            # In auto mode, make trace height proportional to spacing
+            max_trace_height = vertical_spacing * 0.8  # 80% of spacing
+        else:
+            # In manual/percentage mode, use a good default height
+            max_trace_height = ccs_range * 0.12  # 12% of CCS range
 
         # Generate colors
         if settings.stacked_line_color_mode == 'single':
@@ -539,8 +549,9 @@ class CIUVisualization:
         y_tick_positions = []
         y_tick_labels = []
         
-        # Start from bottom of CCS range and stack upward
-        y_start = settings.y_min
+        # FIXED: Start with padding and calculate better positioning
+        y_start_padding = vertical_spacing * 0.5  # Add some bottom padding
+        y_start = settings.y_min - ccs_range * 0.1 + y_start_padding  # Start below CCS range
         
         for plot_index, cv_value in enumerate(selected_cvs):
             # Find corresponding intensity data
@@ -552,13 +563,10 @@ class CIUVisualization:
             if np.max(intensity_data) <= 0:
                 continue
             
-            # REMOVED: Individual trace normalization and baseline correction
-            # Data is already normalized by ORIGAMI at the grid level
-            
             # Y-axis positioning - each trace moves up by vertical_spacing
             base_y_position = y_start + (plot_index * vertical_spacing)
             
-            # Scale intensities to consistent height (they're already 0-1 normalized)
+            # FIXED: Better intensity scaling to make traces more visible
             scaled_intensity = intensity_data * max_trace_height
             
             y_coordinates = base_y_position + scaled_intensity
@@ -577,7 +585,22 @@ class CIUVisualization:
             y_tick_positions.append(base_y_position)
             y_tick_labels.append(f"{cv_value:.0f}")
         
-        # ORIGAMI axis configuration - FIXED CV label handling
+        # FIXED: Better Y-axis limits calculation
+        if y_tick_positions:
+            y_min_plot = min(y_tick_positions) - vertical_spacing * 0.3
+            y_max_plot = max(y_tick_positions) + max_trace_height + vertical_spacing * 0.3
+            
+            ax.set_ylim(y_min_plot, y_max_plot)
+            
+            # Handle CV labels
+            if settings.stacked_show_labels:
+                ax.set_yticks(y_tick_positions)
+                ax.set_yticklabels(y_tick_labels)
+            else:
+                ax.set_yticks([])
+                ax.set_yticklabels([])
+
+        # ORIGAMI axis configuration
         ax.set_xlabel("CCS (Å²)", fontsize=settings.font_size, fontweight='normal', color='black')
         
         # Y-axis label depends on whether CV labels are shown
@@ -587,22 +610,6 @@ class CIUVisualization:
             ax.set_ylabel("Normalised Intensity", fontsize=settings.font_size, fontweight='normal', color='black')
         
         ax.set_xlim(settings.y_min, settings.y_max)  # CCS range on X-axis
-        
-        # Y-axis limits - show all traces with some padding
-        if y_tick_positions:
-            y_min_plot = min(y_tick_positions) - vertical_spacing * 0.1
-            y_max_plot = max(y_tick_positions) + max_trace_height + vertical_spacing * 0.1
-            
-            ax.set_ylim(y_min_plot, y_max_plot)
-            
-            # FIXED: Properly handle CV labels checkbox
-            if settings.stacked_show_labels:
-                ax.set_yticks(y_tick_positions)
-                ax.set_yticklabels(y_tick_labels)
-            else:
-                # Remove all Y-axis ticks and labels when CV labels are disabled
-                ax.set_yticks([])
-                ax.set_yticklabels([])
 
         # ORIGAMI styling
         for spine_name in ['top', 'right', 'left', 'bottom']:
@@ -911,13 +918,13 @@ class CIUInterface:
             
             with col1:
                 st.subheader("Collision Voltage Range")
-                x_min, x_max = st.slider("CV Range", 
+                x_min, x_max = st.slider("CV Range (V)", 
                                         data_range['x_min'], data_range['x_max'], 
                                         (data_range['x_min'], data_range['x_max']))
             
             with col2:
                 st.subheader("CCS Range")
-                y_min, y_max = st.slider("CCS Range", 
+                y_min, y_max = st.slider("CCS Range (Å²)", 
                                         data_range['y_min'], data_range['y_max'], 
                                         (data_range['y_min'], data_range['y_max']))
             
@@ -967,29 +974,60 @@ class CIUInterface:
 
     @staticmethod
     def show_download_options(dpi: int):
-        """Show download buttons for generated plots"""
+        """Show download buttons for generated plots with custom filenames"""
         if "current_figure" in st.session_state and "processed_data" in st.session_state:
             st.subheader("💾 Download Options")
             
+            # Add custom filename input
+            col1, col2 = st.columns([2, 1])
+            with col1:
+                custom_filename = st.text_input(
+                    "Custom filename (without extension)",
+                    value="ciu_heatmap",
+                    help="Enter a custom name for your files"
+                )
+            with col2:
+                st.write("")  # Spacing
+                st.write("")  # More spacing
+                if not custom_filename:
+                    st.warning("⚠️ Please enter a filename")
+                    return
+            
+            # Download buttons with custom filenames
             col1, col2, col3 = st.columns(3)
             
             with col1:
                 csv_data = pd.DataFrame(st.session_state["processed_data"], 
-                                      columns=["CCS", "Drift Time", "Collision Voltage", "Intensity"])
+                                      columns=["CCS (Å²)", "Drift Time (ms)", "Collision Voltage (V)", "Intensity"])
                 csv = csv_data.to_csv(index=False).encode('utf-8')
-                st.download_button("📄 Download CSV", data=csv, file_name="ciu_data.csv", mime="text/csv")
+                st.download_button(
+                    "📄 Download CSV", 
+                    data=csv, 
+                    file_name=f"{custom_filename}.csv", 
+                    mime="text/csv"
+                )
             
             with col2:
                 img_png = BytesIO()
                 st.session_state["current_figure"].savefig(img_png, format='png', bbox_inches="tight", dpi=dpi)
                 img_png.seek(0)
-                st.download_button("🖼️ Download PNG", data=img_png, file_name="ciu_heatmap.png", mime="image/png")
+                st.download_button(
+                    "🖼️ Download PNG", 
+                    data=img_png, 
+                    file_name=f"{custom_filename}.png", 
+                    mime="image/png"
+                )
             
             with col3:
                 img_svg = BytesIO()
                 st.session_state["current_figure"].savefig(img_svg, format='svg', bbox_inches="tight")
                 img_svg.seek(0)
-                st.download_button("📐 Download SVG", data=img_svg, file_name="ciu_heatmap.svg", mime="image/svg+xml")
+                st.download_button(
+                    "📐 Download SVG", 
+                    data=img_svg, 
+                    file_name=f"{custom_filename}.svg", 
+                    mime="image/svg+xml"
+                )
     
     @staticmethod
     def show_instructions():
@@ -1014,10 +1052,12 @@ class CIUInterface:
             4. **Customize Visualization**:
                - **Appearance**: Choose colors, fonts, and plot size
                - **Data Processing**: Set interpolation, ORIGAMI normalization, and smoothing
-               - **Axis Settings**: Define the CV and CCS ranges to display
+               - **Axis Settings**: Define the CV (V) and CCS (Å²) ranges to display
                - **Annotations**: Add reference lines with labels
             
             5. **Generate & Download**: Create your heatmap and download in multiple formats
+               - Enter a custom filename for your downloads
+               - Choose from PNG, SVG, or CSV formats
             
             ### Features:
             - ✅ ORIGAMI-style data processing and normalization
@@ -1025,7 +1065,8 @@ class CIUInterface:
             - ✅ Colorblind-friendly palettes
             - ✅ Advanced smoothing and interpolation
             - ✅ Stacked CCSD visualization option
-            - ✅ Multiple export formats (PNG, SVG, CSV)
+            - ✅ Multiple export formats with custom filenames
+            - ✅ Proper units: CCS in Å², CV in V, Drift Time in ms
             """)
 
 def main():
@@ -1076,7 +1117,13 @@ def main():
                         st.success("✅ Data processed successfully!")
                         
                         df_preview = pd.DataFrame(calibrated_array[:100], 
-                                                columns=["CCS", "Drift Time", "CV", "Intensity"])
+                                                columns=["CCS (Å²)", "Drift Time (ms)", "CV (V)", "Intensity"])
+                        st.dataframe(df_preview, height=200)
+                        st.info(f"Processed {len(calibrated_array):,} data points")
+                        
+                        # Update the preview DataFrame to show proper units
+                        df_preview = pd.DataFrame(calibrated_array[:100], 
+                                                columns=["CCS (Å²)", "Drift Time (ms)", "CV (V)", "Intensity"])
                         st.dataframe(df_preview, height=200)
                         st.info(f"Processed {len(calibrated_array):,} data points")
                         

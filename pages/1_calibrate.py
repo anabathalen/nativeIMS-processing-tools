@@ -395,7 +395,9 @@ class UIComponents:
         'Denatured Myoglobin': 'myoglobin',
         'Denatured Cytochrome C': 'cytochromec',
         'Polyalanine Peptide of Length X': 'polyalanineX',
-        'Denatured Ubiquitin': 'ubiquitin'
+        'Denatured Ubiquitin': 'ubiquitin',
+        'Native BSA': 'BSA',
+        'GRGDS Peptide': 'GRGDS',
     }
     
     @classmethod

@@ -266,8 +266,8 @@ class CalibratedDriftProcessor:
 
     @staticmethod
     def calculate_scale_factor(ms_df: pd.DataFrame, protein_name: str, charge_state: int, 
-                              protein_mass: float, scale_ranges: Dict) -> Tuple[Optional[float], float]:
-        """Calculate scaling factor from mass spectrum integration with baseline fitting"""
+                              protein_mass: float, scale_ranges: Dict, use_max_intensity: bool = False) -> Tuple[Optional[float], float]:
+        """Calculate scaling factor from mass spectrum integration with baseline fitting or max intensity"""
         if ms_df is None or protein_mass is None:
             return None, None
             
@@ -288,12 +288,16 @@ class CalibratedDriftProcessor:
             # Apply smoothing
             smoothed_intensity = ms_df["Intensity"].rolling(window=51, center=True, min_periods=1).mean()
             
-            # Use baseline fitting for more accurate integration
-            scale_factor, _ = fit_baseline_and_integrate(
-                ms_df["m/z"].values, 
-                smoothed_intensity.values, 
-                (mz_min, mz_max)
-            )
+            if use_max_intensity:
+                # Use maximum intensity in the range
+                scale_factor = smoothed_intensity[mask].max()
+            else:
+                # Use baseline fitting for more accurate integration
+                scale_factor, _ = fit_baseline_and_integrate(
+                    ms_df["m/z"].values, 
+                    smoothed_intensity.values, 
+                    (mz_min, mz_max)
+                )
             
             return scale_factor if scale_factor > 0 else None, mz
             
@@ -307,9 +311,10 @@ class CalibratedDriftProcessor:
         cal_csvs: List,
         instrument_type: str,
         inject_time: float,
-        charge_ranges: Dict[str, Tuple[int, int]],  # <-- Change here
+        charge_ranges: Dict[str, Tuple[int, int]],
         scale_ranges: Dict[Tuple[str, int], Tuple[float, float]],
-        protein_masses: Dict[str, float]
+        protein_masses: Dict[str, float],
+        use_max_intensity: bool = False  # <-- Add this parameter
     ) -> CalibratedDriftResult:
         output_buffers = {}
         processed_files = 0
@@ -387,7 +392,7 @@ class CalibratedDriftProcessor:
                     
                     # Calculate scaling factor from mass spectrum
                     scale_factor, mz = CalibratedDriftProcessor.calculate_scale_factor(
-                        ms_df, protein_name, charge_state, protein_mass, scale_ranges
+                        ms_df, protein_name, charge_state, protein_mass, scale_ranges, use_max_intensity
                     )
                     
                     # Skip if scale factor calculation failed
@@ -595,17 +600,19 @@ class UI:
         return (min_charge, max_charge)
 
     @staticmethod
-    def show_instrument_settings() -> Tuple[str, Optional[float]]:
+    def show_instrument_settings() -> Tuple[str, Optional[float], bool]:
         st.markdown("""
         <div class="section-card">
             <div class="section-header">⚙️ Step 5: Instrument Configuration</div>
         </div>
         """, unsafe_allow_html=True)
+        
         instrument_type = st.radio(
             "Select your instrument type:",
             ["Synapt", "Cyclic"],
             help="This affects how drift times are processed"
         )
+        
         inject_time = None
         if instrument_type == "Cyclic":
             inject_time = st.number_input(
@@ -615,7 +622,15 @@ class UI:
                 step=0.1,
                 help="This value will be subtracted from all drift times"
             )
-        return instrument_type, inject_time
+        
+        # Add scale factor method selection
+        use_max_intensity = st.checkbox(
+            "Use maximum intensity as scale factor",
+            value=False,
+            help="If checked, uses the maximum intensity in the integration range instead of baseline-corrected integration"
+        )
+        
+        return instrument_type, inject_time, use_max_intensity
 
     @staticmethod
     def show_processing_status(processed_files: int, matched_points: int, output_files: int):
@@ -662,7 +677,7 @@ class UI:
         """, unsafe_allow_html=True)
 
     @staticmethod
-    def show_integration_range_selector(tmpdir_name: str, protein_names: List[str], protein_masses: Dict[str, float]) -> Tuple[Dict, Dict]:
+    def show_integration_range_selector(tmpdir_name: str, protein_names: List[str], protein_masses: Dict[str, float], use_max_intensity: bool = False) -> Tuple[Dict, Dict]:
         st.markdown("""
         <div class="section-card">
             <div class="section-header">🎚️ Step 6: Select Integration Ranges & Charge States</div>
@@ -795,9 +810,43 @@ class UI:
                     
                     st.write(f"Selected integration range: {selected_range[0]:.3f} - {selected_range[1]:.3f} m/z")
                     
-                    area, range_outside_view = plot_and_integrate_with_baseline(
-                        ms_df, mz, selected_range, smoothing_window, show_zoomed
-                    )
+                    # Calculate scale factor based on method
+                    if use_max_intensity:
+                        # Calculate max intensity in range
+                        mask = (ms_df_window["m/z"] >= selected_range[0]) & (ms_df_window["m/z"] <= selected_range[1])
+                        if np.sum(mask) >= 1:
+                            area = ms_df_window.loc[mask, "Smoothed"].max()
+                            
+                            # Plot for visualization
+                            fig, ax = plt.subplots(figsize=(10, 6))
+                            ax.plot(ms_df_window["m/z"], ms_df_window["Smoothed"], color="blue", linewidth=1.5, label="Smoothed spectrum")
+                            ax.axvline(mz, color="red", linestyle="--", alpha=0.7, label=f"Theoretical m/z: {mz:.3f}")
+                            ax.axvline(selected_range[0], color="green", linestyle="-", alpha=0.8, linewidth=2)
+                            ax.axvline(selected_range[1], color="green", linestyle="-", alpha=0.8, linewidth=2)
+                            
+                            # Highlight the maximum point
+                            max_idx = ms_df_window.loc[mask, "Smoothed"].idxmax()
+                            max_mz = ms_df_window.loc[max_idx, "m/z"]
+                            ax.plot(max_mz, area, 'ro', markersize=8, label=f"Maximum intensity: {area:.2e}")
+                            
+
+                            ax.set_xlabel("m/z")
+                            ax.set_ylabel("Smoothed Intensity")
+                            ax.set_title(f"Maximum Intensity in Range: {selected_range[0]:.3f} - {selected_range[1]:.3f} m/z")
+                            ax.legend()
+                            ax.grid(True, alpha=0.3)
+                            st.pyplot(fig, clear_figure=True)
+                            plt.close(fig)
+                            
+                            range_outside_view = False
+                        else:
+                            area = None
+                            range_outside_view = True
+                    else:
+                        # Use baseline fitting
+                        area, range_outside_view = plot_and_integrate_with_baseline(
+                            ms_df, mz, selected_range, smoothing_window, show_zoomed
+                        )
                     
                     if range_outside_view and show_zoomed:
                         st.info("💡 Integration range extends beyond zoomed view. Use 'Toggle Zoom' to see full spectrum.")
@@ -807,13 +856,15 @@ class UI:
                         st.session_state["scale_ranges"] = scale_ranges
                         scale_factors[(selected_protein, selected_charge)] = area
                         st.session_state["scale_factors"] = scale_factors
-                        st.success(f"✅ Integration area (scale factor): {area:.2e}")
+                        method_text = "Maximum intensity" if use_max_intensity else "Integration area"
+                        st.success(f"✅ {method_text} (scale factor): {area:.2e}")
                     else:
                         st.warning("⚠️ No valid peak detected for this charge state. Try adjusting the range.")
 
         # Show summary table
         if scale_factors or scale_ranges:
-            st.markdown("#### Integration Ranges and Scale Factors")
+            method_text = "Maximum Intensity" if use_max_intensity else "Integration Area"
+            st.markdown(f"#### Integration Ranges and Scale Factors ({method_text} Method)")
             rows = []
             for prot in protein_names:
                 min_c, max_c = charge_ranges[prot]
@@ -866,7 +917,10 @@ def main():
         st.warning("Please enter a mass for every protein.")
         return
 
-    # Step 3: Integration range and charge selection
+    # Step 3: Instrument settings (moved up to get use_max_intensity early)
+    instrument_type, inject_time, use_max_intensity = UI.show_instrument_settings()
+
+    # Step 4: Integration range and charge selection
     if "tmpdir" not in st.session_state:
         tmpdir = tempfile.TemporaryDirectory()
         drift_zip_path = os.path.join(tmpdir.name, "drift.zip")
@@ -879,18 +933,15 @@ def main():
         tmpdir = st.session_state["tmpdir"]
 
     scale_ranges, charge_ranges = UI.show_integration_range_selector(
-        tmpdir.name, protein_names, protein_masses
+        tmpdir.name, protein_names, protein_masses, use_max_intensity
     )
-
-    # Step 4: Instrument settings
-    instrument_type, inject_time = UI.show_instrument_settings()
 
     # Step 5: Process data
     if st.button("🚀 Process Normalized ATDs", type="primary"):
         with st.spinner("Processing normalized ATD data..."):
             result = CalibratedDriftProcessor.match_and_calibrate(
                 drift_zip, cal_csvs, instrument_type, inject_time,
-                charge_ranges, scale_ranges, protein_masses
+                charge_ranges, scale_ranges, protein_masses, use_max_intensity
             )
 
         if result.output_buffers:
@@ -900,11 +951,25 @@ def main():
                 total_points = sum(len(df) for df in dfs)
                 UI.show_protein_card(protein_name, total_points, len(dfs))
 
+            # Add custom filename input
+            st.markdown("### 📁 Download Options")
+            custom_filename = st.text_input(
+                "Custom filename (without .zip extension)",
+                value="normalized_calibrated_drift_data",
+                help="Enter a custom name for your download file"
+            )
+            
+            # Ensure filename ends with .zip
+            if not custom_filename.endswith('.zip'):
+                download_filename = f"{custom_filename}.zip"
+            else:
+                download_filename = custom_filename
+
             zip_buffer = CalibratedDriftProcessor.prepare_zip(result.output_buffers)
             st.download_button(
                 label="📦 Download Normalized & Calibrated Data (ZIP)",
                 data=zip_buffer,
-                file_name="normalized_calibrated_drift_data.zip",
+                file_name=download_filename,
                 mime="application/zip"
             )
             UI.show_next_steps()
