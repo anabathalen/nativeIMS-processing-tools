@@ -177,7 +177,7 @@ def get_extended_color_palette(palette_name, n_colors):
         if hasattr(colors, '__iter__') and hasattr(colors[0], '__len__') and len(colors[0]) == 4:  # For colormap colors (RGBA)
             return [colors[i] for i in range(min(n_colors, len(colors)))]
         elif isinstance(colors, list) and isinstance(colors[0], str):  # For hex color strings
-            return colors[:n_colors] if len(colors) >= n_colors : colors * ((n_colors // len(colors)) + 1)
+            return colors[:n_colors] if len(colors) >= n_colors else colors * ((n_colors // len(colors)) + 1)
         else:  # For seaborn palettes or numpy arrays
             return list(colors)[:n_colors]
     else:
