@@ -345,46 +345,51 @@ class FileGenerator:
     
     @staticmethod
     def create_download_buttons(results_df: pd.DataFrame, params: CalibrationParams) -> None:
-        """Create download buttons for results."""
+        """Create download buttons for results with user-defined filenames."""
         if results_df.empty:
             st.markdown(
                 '<div class="error-card">No valid results to download. Please check your data and database matching.</div>',
                 unsafe_allow_html=True
             )
             return
-        
+
         st.markdown('<div class="section-divider">', unsafe_allow_html=True)
         st.markdown('<h3 class="section-header">📥 Download Results</h3>', unsafe_allow_html=True)
-        
+
         col1, col2 = st.columns(2)
-        
+
         with col1:
-            # CSV download
+            # User input for CSV filename
+            csv_filename = st.text_input(
+                "CSV filename", value="combined_gaussian_fit_results.csv", key="csv_filename"
+            )
             csv_buffer = io.StringIO()
             results_df.to_csv(csv_buffer, index=False)
             st.download_button(
                 label="📊 Download Results (CSV)",
                 data=csv_buffer.getvalue(),
-                file_name="combined_gaussian_fit_results.csv",
+                file_name=csv_filename if csv_filename else "combined_gaussian_fit_results.csv",
                 mime="text/csv"
             )
-        
+
         with col2:
-            # Adjust drift times for cyclic data
+            # User input for .dat filename
+            dat_filename = st.text_input(
+                ".dat filename", value="calibration_data.dat", key="dat_filename"
+            )
             adjusted_df = results_df.copy()
             if params.data_type.lower() == "cyclic":
                 adjusted_df['drift time'] = adjusted_df['drift time'] - params.inject_time
-            
-            # .dat file download
+
             dat_content = FileGenerator.generate_dat_content(adjusted_df, params)
             if dat_content:
                 st.download_button(
                     label="📋 Download .dat File",
                     data=dat_content,
-                    file_name="calibration_data.dat",
+                    file_name=dat_filename if dat_filename else "calibration_data.dat",
                     mime="text/plain"
                 )
-        
+
         st.markdown('</div>', unsafe_allow_html=True)
 
 
