@@ -150,7 +150,7 @@ def detect_peaks(df, prominence=0.01, distance=50):
     return peak_data
 
 def get_extended_color_palette(palette_name, n_colors):
-    """Extended color palette options"""
+    """Extended color palette options - FIXED"""
     palettes = {
         "Scientific": ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf'],
         "Nature": ['#0173B2', '#DE8F05', '#029E73', '#CC78BC', '#CA9161', '#FBAFE4', '#949494', '#ECE133', '#56B4E9', '#F0E442'],
@@ -174,14 +174,15 @@ def get_extended_color_palette(palette_name, n_colors):
     
     if palette_name in palettes:
         colors = palettes[palette_name]
-        if hasattr(colors, '__iter__') and hasattr(colors[0], '__len__') and len(colors[0]) == 4:  # For colormap colors (RGBA)
-            return [colors[i] for i in range(min(n_colors, len(colors)))]
-        elif isinstance(colors, list) and isinstance(colors[0], str):  # For hex color strings
-            return colors[:n_colors] if len(colors) >= n_colors else colors * ((n_colors // len(colors)) + 1)
-        else:  # For seaborn palettes or numpy arrays
-            return list(colors)[:n_colors]
-    else:
-        return sns.color_palette("husl", n_colors)
+        if hasattr(colors, '__iter__') and len(colors) > 0:
+            if hasattr(colors[0], '__len__') and len(colors[0]) == 4:  # For colormap colors (RGBA)
+                return [colors[i] for i in range(min(n_colors, len(colors)))]
+            elif isinstance(colors, list) and isinstance(colors[0], str):  # For hex color strings
+                return colors[:n_colors] if len(colors) >= n_colors else colors * ((n_colors // len(colors)) + 1)
+            else:  # For seaborn palettes or numpy arrays
+                return list(colors)[:n_colors]
+    
+    return sns.color_palette("husl", n_colors)
 
 def plot_enhanced_spectrum(file_paths, file_names, mass_configs, plot_settings, processing_options, plot_type="single"):
     """Enhanced plotting function with manual peak identification and fixed transparent background"""
@@ -252,7 +253,8 @@ def plot_enhanced_spectrum(file_paths, file_names, mass_configs, plot_settings, 
                                       color=plot_settings['line_color'])
         
         elif plot_type == "stacked":
-            df['normalized'] = df['intensity'] / max_intensity * plot_settings['zoom_factors'][i]
+            zoom_factor = plot_settings.get('zoom_factors', [1.0] * len(file_paths))[i] if i < len(plot_settings.get('zoom_factors', [])) else 1.0
+            df['normalized'] = df['intensity'] / max_intensity * zoom_factor
             staggered = df['normalized'] + i * plot_settings.get('stack_offset', 1.2)
             
             current_ax.plot(df['m/z'], staggered, 
@@ -263,7 +265,7 @@ def plot_enhanced_spectrum(file_paths, file_names, mass_configs, plot_settings, 
             # Spectrum labels
             x_range = plot_settings['x_max'] - plot_settings['x_min']
             label_x = plot_settings['x_max'] - (0.05 * x_range)
-            label_text = plot_settings.get('titles', [f"Spectrum {i+1}"])[i]
+            label_text = plot_settings.get('titles', [f"Spectrum {i+1}"])[i] if i < len(plot_settings.get('titles', [])) else f"Spectrum {i+1}"
             current_ax.text(label_x, staggered.iloc[0] + 0.1, label_text, 
                            fontsize=plot_settings['font_size'], ha='right')
         
@@ -311,7 +313,7 @@ def plot_enhanced_spectrum(file_paths, file_names, mass_configs, plot_settings, 
                                       xytext=(5, 5), textcoords='offset points',
                                       fontsize=plot_settings['font_size']-2)
     
-    # Mass annotations with correct m/z calculations
+    # Mass annotations
     for config in mass_configs:
         if config.get('mode') == 'manual':
             # Manual peak identification
@@ -390,7 +392,7 @@ def plot_enhanced_spectrum(file_paths, file_names, mass_configs, plot_settings, 
                     current_ax.text(peak_mz, y_label, label_text, **label_kwargs)
         
         elif config.get('mode') == 'automatic':
-            # Existing automatic mass calculation code
+            # Automatic mass calculation code
             color = config['color']
             shape = config['shape']
             mass = config['mass']
@@ -431,10 +433,45 @@ def plot_enhanced_spectrum(file_paths, file_names, mass_configs, plot_settings, 
                                 if plot_settings.get('show_mass_labels', False):
                                     label_text += f'\n{mass:.0f}Da'
                                 
-                                # Same label styling as manual mode...
-                                # [Include the same label styling code as above]
+                                # Apply same label styling as manual mode
+                                label_kwargs = {
+                                    'ha': 'center', 
+                                    'va': 'bottom',
+                                    'fontsize': plot_settings.get('label_font_size', plot_settings['font_size']), 
+                                    'color': color, 
+                                    'weight': plot_settings.get('label_font_weight', 'bold')
+                                }
+                                
+                                if plot_settings.get('show_label_borders', True):
+                                    border_style = plot_settings.get('label_border_style', 'round')
+                                    boxstyle_map = {
+                                        'round': "round,pad=0.3",
+                                        'square': "square,pad=0.3", 
+                                        'sawtooth': "sawtooth,pad=0.3",
+                                        'circle': "circle,pad=0.3"
+                                    }
+                                    
+                                    bg_color = plot_settings.get('label_background_color', 'white')
+                                    if bg_color == 'auto':
+                                        bg_color = 'white' if plot_settings['background'] not in ['transparent', 'white'] else 'lightgray'
+                                    elif bg_color == 'transparent':
+                                        bg_color = 'none'
+                                
+                                    border_color = plot_settings.get('label_border_color', 'black')
+                                    if border_color == 'auto':
+                                        border_color = color
+                                    
+                                    label_kwargs['bbox'] = dict(
+                                        boxstyle=boxstyle_map.get(border_style, "round,pad=0.3"),
+                                        facecolor=bg_color,
+                                        edgecolor=border_color,
+                                        linewidth=plot_settings.get('label_border_width', 0.5),
+                                        alpha=plot_settings.get('label_background_alpha', 0.8)
+                                    )
+                                
+                                current_ax.text(mz, y_label, label_text, **label_kwargs)
     
-    # Enhanced axis formatting and styling with full customization
+    # Enhanced axis formatting and styling
     for ax_idx, current_ax in enumerate(axes):
         # X-axis settings
         current_ax.set_xlim(plot_settings['x_min'], plot_settings['x_max'])
@@ -524,7 +561,7 @@ def plot_enhanced_spectrum(file_paths, file_names, mass_configs, plot_settings, 
     if plot_settings.get('title', ''):
         fig.suptitle(plot_settings['title'], 
                     fontsize=plot_settings['font_size']+2, 
-                    weight=plot_settings.get('title_weight', 'bold'))  # Use the setting instead of hardcoded 'bold'
+                    weight=plot_settings.get('title_weight', 'bold'))
     
     if plot_settings.get('show_legend', False):
         if plot_type == "overlay":
@@ -534,13 +571,21 @@ def plot_enhanced_spectrum(file_paths, file_names, mass_configs, plot_settings, 
         elif mass_configs:
             legend_elements = []
             for config in mass_configs:
-                legend_elements.append(
-                    plt.Line2D([0], [0], marker=config['shape'], color='w', 
-                              markerfacecolor=config['color'], markersize=8, 
-                              label=f"{config['mass']:.0f} Da")
-                )
-            axes[0].legend(handles=legend_elements, loc=plot_settings.get('legend_pos', 'upper right'),
-                          frameon=plot_settings.get('legend_frame', False))
+                if config.get('mode') == 'automatic':
+                    legend_elements.append(
+                        plt.Line2D([0], [0], marker=config['shape'], color='w', 
+                                  markerfacecolor=config['color'], markersize=8, 
+                                  label=f"{config['mass']:.0f} Da")
+                    )
+                elif config.get('mode') == 'manual':
+                    legend_elements.append(
+                        plt.Line2D([0], [0], marker=config['shape'], color='w', 
+                                  markerfacecolor=config['color'], markersize=8, 
+                                  label=config['label'])
+                    )
+            if legend_elements:
+                axes[0].legend(handles=legend_elements, loc=plot_settings.get('legend_pos', 'upper right'),
+                              frameon=plot_settings.get('legend_frame', False))
     
     plt.tight_layout()
     return fig
@@ -756,69 +801,6 @@ if uploaded_files and all(f is not None for f in uploaded_files):
                    'X', 'Octagon', 'Hexagon2']
     shape_mapping = dict(zip(shape_names, available_shapes))
     
-    # Number of masses to configure
-    if plot_type == "Hybrid Stacked":
-        st.write("**Configure one mass per spectrum:**")
-        mass_configs = []
-        colors = get_extended_color_palette(palette, len(uploaded_files))
-        
-        for i, file_name in enumerate(file_names):
-            with st.expander(f"**Spectrum {i+1}: {file_name}**", expanded=True):
-                col1, col2, col3, col4 = st.columns(4)
-                
-                with col1:
-                    mass = st.number_input(f"Mass (Da):", value=15000.0, key=f"hybrid_mass_{i}")
-                with col2:
-                    shape_name = st.selectbox("Shape:", shape_names, key=f"hybrid_shape_{i}")
-                    shape = shape_mapping[shape_name]
-                with col3:
-                    charge_input = st.text_input("Charge states:", "10,11,12,13", key=f"hybrid_charges_{i}")
-                with col4:
-                    pass
-                
-                try:
-                    charge_states = [int(c.strip()) for c in charge_input.split(',') if c.strip()]
-                    mass_configs.append({
-                        'mode': 'automatic',
-                        'mass': mass,
-                        'charge_states': charge_states,
-                        'color': colors[i],
-                        'shape': shape
-                    })
-                except ValueError:
-                    st.error(f"Invalid charge states for spectrum {i+1}")
-    
-    else:
-        num_masses = st.number_input("Number of masses to annotate:", 1, 10, 1)
-        mass_configs = []
-        colors = get_extended_color_palette(palette, num_masses)
-        
-        for i in range(num_masses):
-            with st.expander(f"**Mass {i+1}**", expanded=True):
-                col1, col2, col3, col4 = st.columns(4)
-                
-                with col1:
-                    mass = st.number_input(f"Mass (Da):", value=15000.0 + i*1000, key=f"mass_{i}")
-                with col2:
-                    shape_name = st.selectbox("Shape:", shape_names, key=f"shape_{i}")
-                    shape = shape_mapping[shape_name]
-                with col3:
-                    charge_input = st.text_input("Charge states:", "10,11,12,13", key=f"charges_{i}")
-                with col4:
-                    pass
-                
-                try:
-                    charge_states = [int(c.strip()) for c in charge_input.split(',') if c.strip()]
-                    mass_configs.append({
-                        'mode': 'automatic',
-                        'mass': mass,
-                        'charge_states': charge_states,
-                        'color': colors[i],
-                        'shape': shape
-                    })
-                except ValueError:
-                    st.error(f"Invalid charge states for mass {i+1}")
-    
     # Enhanced Annotation Settings with manual peak identification
     st.markdown('<h3 class="section-header">🏷️ Annotation Settings</h3>', unsafe_allow_html=True)
 
@@ -875,8 +857,7 @@ if uploaded_files and all(f is not None for f in uploaded_files):
                     })
 
     elif annotation_mode == "Automatic mass calculations":
-        # Existing mass configuration code here...
-        # [Keep all the existing mass configuration code from your original file]
+        # Existing mass configuration code
         if plot_type == "Hybrid Stacked":
             st.write("**Configure one mass per spectrum:**")
             mass_configs = []
@@ -975,4 +956,204 @@ if uploaded_files and all(f is not None for f in uploaded_files):
                 label_background_alpha = st.slider("Background alpha:", 0.0, 1.0, 0.8)
                 label_background_color = st.selectbox("Background color:", ["white", "lightgray", "auto", "transparent"])
 
-# ...existing code until the plotting function...
+    # Initialize default values for variables that might not be defined
+    if annotation_mode == "No annotations":
+        marker_size = 80
+        offset = 0.1
+        show_annotation_lines = True
+        label_font_size = 12
+        label_font_weight = "bold"
+        show_label_borders = True
+        label_border_style = "round"
+        label_border_width = 0.5
+        label_border_color = "black"
+        label_background_alpha = 0.8
+        label_background_color = "white"
+        # For automatic mode only
+        threshold = 0.01
+        annotation_width = 100
+        show_mz_labels = False
+        show_mass_labels = False
+
+    # Additional plot settings
+    st.markdown('<h3 class="section-header">🎯 Plot Settings</h3>', unsafe_allow_html=True)
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        plot_title = st.text_input("Plot title (optional):", "")
+        zoom = st.slider("Y-axis zoom:", 0.5, 3.0, 1.4)
+
+    with col2:
+        show_legend = st.checkbox("Show legend")
+        if show_legend:
+            legend_pos = st.selectbox("Legend position:", 
+                                    ["upper right", "upper left", "lower right", "lower left", "center"])
+            legend_frame = st.checkbox("Legend frame", False)
+
+    with col3:
+        if plot_type == "Stacked Comparison":
+            stack_offset = st.slider("Stack offset:", 0.5, 3.0, 1.2)
+        elif plot_type == "Mirror Plot":
+            line_color_2 = st.selectbox("Second spectrum color:", 
+                                      ["red", "blue", "green", "purple", "orange", "brown"], index=0)
+
+    # PLOT GENERATION BUTTON AND LOGIC
+    if st.button("🎨 Generate Advanced Plot", type="primary"):
+        with st.spinner("Processing data and generating plot..."):
+            try:
+                # Save uploaded files temporarily
+                file_paths = []
+                for uploaded_file in uploaded_files:
+                    temp_path = f"temp_{uploaded_file.name}"
+                    with open(temp_path, "wb") as f:
+                        f.write(uploaded_file.getbuffer())
+                    file_paths.append(temp_path)
+                
+                # Compile all settings
+                plot_settings = {
+                    'width': figure_width,
+                    'height': figure_height,
+                    'dpi': dpi,
+                    'font_size': font_size,
+                    'font_family': font_family,
+                    'font_weight': font_weight,
+                    'background': background,
+                    'x_min': x_min,
+                    'x_max': x_max,
+                    'line_color': line_color,
+                    'line_width': line_width,
+                    'line_style': line_style,
+                    'alpha': alpha,
+                    'fill_under': fill_under,
+                    'fill_alpha': fill_alpha if fill_under else 0.3,
+                    'palette': palette,
+                    'show_grid': show_grid,
+                    'grid_alpha': grid_alpha if show_grid else 0.3,
+                    'grid_style': grid_style if show_grid else '--',
+                    'grid_color': 'gray',
+                    'custom_x_ticks': custom_x_ticks,
+                    'x_tick_spacing': x_tick_spacing if custom_x_ticks else 500,
+                    'show_x_tick_labels': show_x_tick_labels,
+                    'hide_y_ticks': hide_y_ticks,
+                    'show_y_tick_labels': show_y_tick_labels if not hide_y_ticks else True,
+                    'y_tick_count': y_tick_count if not hide_y_ticks else 5,
+                    'show_bottom_axis': show_bottom_axis,
+                    'show_top_axis': show_top_axis,
+                    'show_left_axis': show_left_axis,
+                    'show_right_axis': show_right_axis,
+                    'show_x_label': show_x_label,
+                    'x_label_text': x_label_text if show_x_label else 'm/z',
+                    'show_y_label': show_y_label,
+                    'y_label_text': y_label_text if show_y_label else 'Intensity',
+                    'axis_label_size': axis_label_size,
+                    'axis_label_weight': axis_label_weight,
+                    'tick_label_size': tick_label_size,
+                    'spine_width': spine_width,
+                    'spine_color': spine_color,
+                    'title': plot_title,
+                    'title_weight': font_weight,
+                    'show_legend': show_legend,
+                    'legend_pos': legend_pos if show_legend else 'upper right',
+                    'legend_frame': legend_frame if show_legend else False,
+                    'zoom': zoom,
+                    'stack_offset': stack_offset if plot_type == "Stacked Comparison" else 1.2,
+                    'line_color_2': line_color_2 if plot_type == "Mirror Plot" else 'red',
+                    'show_peaks': show_peaks,
+                    'peak_prominence': peak_prominence if show_peaks else 0.01,
+                    'peak_distance': peak_distance if show_peaks else 50,
+                    'max_peaks': max_peaks if show_peaks else 10,
+                    'show_peak_labels': show_peak_labels if show_peaks else False,
+                    'marker_size': marker_size,
+                    'offset': offset,
+                    'show_annotation_lines': show_annotation_lines,
+                    'label_font_size': label_font_size,
+                    'label_font_weight': label_font_weight,
+                    'show_label_borders': show_label_borders,
+                    'label_border_style': label_border_style,
+                    'label_border_width': label_border_width,
+                    'label_border_color': label_border_color,
+                    'label_background_alpha': label_background_alpha,
+                    'label_background_color': label_background_color,
+                    'threshold': threshold if annotation_mode == "Automatic mass calculations" else 0.01,
+                    'annotation_width': annotation_width if annotation_mode == "Automatic mass calculations" else 100,
+                    'show_mz_labels': show_mz_labels if annotation_mode == "Automatic mass calculations" else False,
+                    'show_mass_labels': show_mass_labels if annotation_mode == "Automatic mass calculations" else False,
+                }
+
+                processing_options = {
+                    'smoothing': smoothing,
+                    'smooth_window': smooth_window if smoothing else 5,
+                    'smooth_order': smooth_order if smoothing else 2,
+                    'baseline_correction': baseline_correction,
+                    'baseline_percentile': baseline_percentile if baseline_correction else 5,
+                    'intensity_threshold': intensity_threshold / 100,
+                    'normalize': normalize,
+                    'normalize_type': normalize_type if normalize else 'max',
+                    'binning': binning,
+                    'bin_size': bin_size if binning else 1.0,
+                    'bin_method': bin_method if binning else 'max',
+                }
+
+                # Generate plot
+                plot_type_map = {
+                    "Single Spectrum": "single",
+                    "Stacked Comparison": "stacked", 
+                    "Hybrid Stacked": "stacked",
+                    "Mirror Plot": "mirror",
+                    "Overlay Plot": "overlay"
+                }
+
+                fig = plot_enhanced_spectrum(
+                    file_paths, file_names, mass_configs, plot_settings, 
+                    processing_options, plot_type_map[plot_type]
+                )
+
+                # Display plot
+                st.pyplot(fig)
+
+                # Download options
+                st.markdown("### 📥 Download Options")
+                col1, col2 = st.columns(2)
+
+                with col1:
+                    # PNG download with transparent background support
+                    buf = io.BytesIO()
+                    facecolor = 'none' if background == 'transparent' else background
+                    fig.savefig(buf, format='png', dpi=dpi, bbox_inches='tight', 
+                               facecolor=facecolor, transparent=(background == 'transparent'))
+                    buf.seek(0)
+                    st.download_button("📊 Download PNG", buf.getvalue(), 
+                                     f"{plot_type.lower().replace(' ', '_')}_plot.png", "image/png")
+
+                with col2:
+                    # PDF/SVG/EPS download with transparent support
+                    if output_format in ["PDF", "SVG", "EPS"]:
+                        buf = io.BytesIO()
+                        facecolor = 'none' if background == 'transparent' else background
+                        fig.savefig(buf, format=output_format.lower(), bbox_inches='tight',
+                                   facecolor=facecolor, transparent=(background == 'transparent'))
+                        buf.seek(0)
+
+                        mime_types = {"PDF": "application/pdf", "SVG": "image/svg+xml", "EPS": "application/postscript"}
+                        st.download_button(f"📊 Download {output_format}", buf.getvalue(),
+                                         f"{plot_type.lower().replace(' ', '_')}_plot.{output_format.lower()}", 
+                                         mime_types[output_format])
+
+                # Clean up temporary files
+                for temp_path in file_paths:
+                    try:
+                        os.remove(temp_path)
+                    except:
+                        pass
+
+            except Exception as e:
+                st.error(f"❌ Error generating plot: {str(e)}")
+                # Clean up temporary files even on error
+                for temp_path in file_paths:
+                    try:
+                        os.remove(temp_path)
+                    except:
+                        pass
+
+else:
+    st.info("👆 Please upload spectrum files to begin plotting.")
