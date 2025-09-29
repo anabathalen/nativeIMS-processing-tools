@@ -7,7 +7,7 @@ from scipy.signal import savgol_filter
 import matplotlib.colors as mcolors
 import seaborn as sns
 from io import BytesIO
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Tuple, Optional, Dict, Any, List, Union
 from pathlib import Path
 from sklearn.preprocessing import normalize
@@ -60,7 +60,7 @@ class ProcessingSettings:
 
 @dataclass
 class HeatmapSettings:
-    """Configuration for heatmap visualization"""
+    """Configuration for heatmap visualization - FIXED argument order"""
     x_min: float
     x_max: float
     y_min: float
@@ -69,6 +69,9 @@ class HeatmapSettings:
     interpolation_method: str
     grid_resolution: int
     apply_smoothing: bool
+    # All optional parameters with defaults
+    x_grid_resolution: Optional[int] = None
+    y_grid_resolution: Optional[int] = None
     smoothing_type: str = 'savgol'
     window_length: int = 11
     poly_order: int = 3
@@ -85,10 +88,10 @@ class HeatmapSettings:
     show_colorbar: bool = True
     colorbar_shrink: float = 0.8
     colorbar_aspect: int = 20
-    x_values: List[float] = None
-    x_labels: List[str] = None
-    y_values: List[float] = None
-    y_labels: List[str] = None
+    x_values: List[float] = field(default_factory=list)
+    x_labels: List[str] = field(default_factory=list)
+    y_values: List[float] = field(default_factory=list)
+    y_labels: List[str] = field(default_factory=list)
     reference_line_color: str = 'black'
     stacked_offset_mode: str = 'auto'
     stacked_offset_value: float = 1.0
@@ -99,16 +102,6 @@ class HeatmapSettings:
     stacked_line_color_mode: str = 'gradient'
     stacked_single_color: str = '#1f77b4'
     show_grid: bool = False
-    
-    def __post_init__(self):
-        if self.x_values is None:
-            self.x_values = []
-        if self.x_labels is None:
-            self.x_labels = []
-        if self.y_values is None:
-            self.y_values = []
-        if self.y_labels is None:
-            self.y_labels = []
 
 # Context managers for better resource management
 @contextmanager
@@ -153,6 +146,9 @@ class CIUDataProcessor:
             df = df.dropna(subset=[df.columns[0]])
             df.columns = ['Drift Time'] + list(df.columns[1:])
             
+            # Ensure no negative intensities
+            df.iloc[:, 1:] = df.iloc[:, 1:].clip(lower=0)
+            
             return df
             
         except Exception as e:
@@ -160,7 +156,7 @@ class CIUDataProcessor:
     
     @staticmethod
     def load_calibration_data(file, charge_state: int) -> pd.DataFrame:
-        """Load calibration data - keep drift times as-is, just convert to milliseconds"""
+        """Load calibration data - convert drift times from seconds to milliseconds"""
         try:
             cal_df = pd.read_csv(file)
             cal_data = cal_df[cal_df["Z"] == charge_state].copy()
@@ -173,7 +169,7 @@ class CIUDataProcessor:
             if missing_cols:
                 raise ValueError(f"Calibration data missing required columns: {missing_cols}")
             
-            # Simply convert calibration drift times from seconds to milliseconds - NO OTHER MODIFICATIONS
+            # Convert calibration drift times from seconds to milliseconds
             cal_data["Drift (ms)"] = cal_data["Drift"] * 1000
             return cal_data
             
@@ -182,59 +178,48 @@ class CIUDataProcessor:
     
     @staticmethod
     def apply_drift_correction(df: pd.DataFrame, settings: ProcessingSettings) -> pd.DataFrame:
-        """Apply instrument-specific drift time corrections"""
+        """Apply instrument-specific drift time corrections - ONLY subtract inject_time here"""
         df_corrected = df.copy()
         
+        # Only subtract inject_time for Cyclic data, and only once
         if settings.data_type == InstrumentType.CYCLIC and settings.inject_time is not None:
             df_corrected["Drift Time"] = df_corrected["Drift Time"] - settings.inject_time
         
         return df_corrected
     
-    @staticmethod
-    @lru_cache(maxsize=32)
-    def _get_calibration_lookup(cal_data_hash: str, cal_data_pickle: bytes) -> Dict[float, float]:
-        """Cache calibration lookups to avoid repeated calculations"""
-        cal_data = pickle.loads(cal_data_pickle)
-        
-        lookup = {}
-        for _, row in cal_data.iterrows():
-            drift_rounded = round(row["Drift (ms)"], 4)
-            lookup[drift_rounded] = row["CCS"]
-        return lookup
-    
     def calibrate_data(self, twim_df: pd.DataFrame, cal_data: pd.DataFrame, inject_time: float = 0.0) -> np.ndarray:
-        """Calibrate TWIM data - subtract inject time from each drift time, then interpolate CCS"""
+        """Calibrate TWIM data - use already-corrected drift times, interpolate CCS"""
         calibrated_data = []
-        
-        drift_times = twim_df["Drift Time"]
+
+        drift_times = twim_df["Drift Time"].values
         collision_voltages = twim_df.columns[1:]
-        
+
         # Sort calibration data by drift time for interpolation
         cal_data_sorted = cal_data.sort_values("Drift (ms)")
         cal_drift_times = cal_data_sorted["Drift (ms)"].values
         cal_ccs_values = cal_data_sorted["CCS"].values
-        
+
         for idx, drift_time in enumerate(drift_times):
             if pd.isna(drift_time):
                 continue
-            
-            # Step 1: Convert drift time to milliseconds and subtract inject time
-            corrected_drift_time = drift_time - inject_time
-            
+
+            # Use drift_time as-is (already corrected in apply_drift_correction)
+            # DO NOT subtract inject_time again!
+            corrected_drift_time = drift_time
+
             intensities = twim_df.iloc[idx, 1:].values
-            
-            # Step 2: Look up corresponding CCS value using linear interpolation
+
+            # Interpolate CCS value using calibration curve
             if corrected_drift_time <= cal_drift_times.min():
-                # Extrapolate using first calibration point
                 ccs_value = cal_ccs_values[0]
             elif corrected_drift_time >= cal_drift_times.max():
-                # Extrapolate using last calibration point
                 ccs_value = cal_ccs_values[-1]
             else:
-                # Linear interpolation between the two nearest calibration points
                 ccs_value = np.interp(corrected_drift_time, cal_drift_times, cal_ccs_values)
-            
-            # Step 3: Create calibrated data points for each CV
+
+            # Ensure CCS is never negative
+            ccs_value = max(ccs_value, 0)
+
             for col_idx, intensity in enumerate(intensities):
                 if not pd.isna(intensity) and intensity > 0:
                     cv = collision_voltages[col_idx]
@@ -243,10 +228,10 @@ class CIUDataProcessor:
                         calibrated_data.append([ccs_value, corrected_drift_time, cv_float, intensity])
                     except (ValueError, TypeError):
                         continue
-        
+
         if not calibrated_data:
             raise ValueError("No valid calibrated data points generated")
-        
+
         return np.array(calibrated_data)
 
 class CIUVisualization:
@@ -282,48 +267,57 @@ class CIUVisualization:
     
     @staticmethod
     def normalize_2D_origami(inputData: np.ndarray, mode: str = 'Maximum') -> np.ndarray:
-        """EXACT copy of ORIGAMI's normalize_2D function - no debug output"""
+        """EXACT copy of ORIGAMI's normalize_2D function"""
         inputData = np.nan_to_num(inputData)
+        inputData[inputData < 0] = 0  # Clip negatives
         
         if mode == "Maximum":
             normData = normalize(inputData.astype(np.float64), axis=0, norm='max')
         elif mode == 'Logarithmic':
-            normData = np.log10(inputData.astype(np.float64))
+            normData = np.log10(np.clip(inputData.astype(np.float64), a_min=1e-10, a_max=None))
         elif mode == 'Natural log':
-            normData = np.log(inputData.astype(np.float64))
+            normData = np.log(np.clip(inputData.astype(np.float64), a_min=1e-10, a_max=None))
         elif mode == 'Square root':
-            normData = np.sqrt(inputData.astype(np.float64))
+            normData = np.sqrt(np.clip(inputData.astype(np.float64), a_min=0, a_max=None))
         elif mode == 'Least Abs Deviation':
             normData = normalize(inputData.astype(np.float64), axis=0, norm='l1')
         elif mode == 'Least Squares':
             normData = normalize(inputData.astype(np.float64), axis=0, norm='l2')
         
+        normData[normData < 0] = 0  # Clip negatives after normalization
         return normData
     
     def create_interpolation_grid_origami(self, data: np.ndarray, settings: HeatmapSettings) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Create interpolated intensity grid EXACTLY like ORIGAMI - conditional normalization"""
+        """Create interpolated intensity grid using regular grid in both CV and CCS directions (ORIGAMI style)"""
         filtered_data = self.filter_data_by_range(data, settings)
         
-        grid_x = np.linspace(settings.x_min, settings.x_max, num=settings.grid_resolution)
-        grid_y = np.linspace(settings.y_min, settings.y_max, num=settings.grid_resolution)
-        X, Y = np.meshgrid(grid_x, grid_y)
+        # Use separate X and Y grid resolutions if provided, otherwise use default
+        x_points = settings.x_grid_resolution or settings.grid_resolution
+        y_points = settings.y_grid_resolution or settings.grid_resolution
         
+        # Create regular grids for both CV (X) and CCS (Y)
+        cv_grid = np.linspace(settings.x_min, settings.x_max, x_points)
+        ccs_grid = np.linspace(settings.y_min, settings.y_max, y_points)
+        X, Y = np.meshgrid(cv_grid, ccs_grid)
+
+        # Interpolate intensity onto the regular grid
         Z = griddata(
-            (filtered_data[:, 2], filtered_data[:, 0]),
-            filtered_data[:, 3],
+            (filtered_data[:, 2], filtered_data[:, 0]),  # (CV, CCS)
+            filtered_data[:, 3],  # Intensity
             (X, Y),
             method=settings.interpolation_method,
             fill_value=0
         )
         
         Z = np.nan_to_num(Z, nan=0.0)
+        Z[Z < 0] = 0  # Clip negatives after interpolation
         
         # Apply ORIGAMI normalization only if requested
         if settings.normalize_data:
             Z = self.normalize_2D_origami(Z, mode='Maximum')
         
         return X, Y, Z, filtered_data
-    
+
     def create_interpolation_grid_origami_stacked(self, data: np.ndarray, settings: HeatmapSettings) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """Create interpolated intensity grid for stacked plots - ALWAYS NORMALIZED"""
         filtered_data = self.filter_data_by_range(data, settings)
@@ -771,7 +765,8 @@ class CIUInterface:
             with col1:
                 st.subheader("Interpolation")
                 interpolation_method = st.selectbox("Method", ["cubic", "linear", "nearest"])
-                grid_resolution = st.number_input("Grid Resolution", min_value=50, max_value=500, value=200, step=10)
+                x_grid_resolution = st.number_input("CV Grid Resolution", min_value=50, max_value=500, value=200, step=10)
+                y_grid_resolution = st.number_input("CCS Grid Resolution", min_value=50, max_value=500, value=200, step=10)
                 
                 if plot_type == "Heatmap":
                     # ORIGAMI-style normalization option for heatmaps only
@@ -788,7 +783,9 @@ class CIUInterface:
                 
                 settings_dict.update({
                     'interpolation_method': interpolation_method, 
-                    'grid_resolution': grid_resolution, 
+                    'grid_resolution': max(x_grid_resolution, y_grid_resolution),  # for backward compatibility
+                    'x_grid_resolution': x_grid_resolution,
+                    'y_grid_resolution': y_grid_resolution,
                     'normalize_data': normalize_data
                 })
             
