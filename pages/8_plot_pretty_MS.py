@@ -12,6 +12,7 @@ from matplotlib.patches import Rectangle
 from matplotlib.ticker import MaxNLocator, MultipleLocator
 import matplotlib.patches as mpatches
 from myutils import styling
+from matplotlib.lines import Line2D  # <-- add
 
 # Apply custom styling
 styling.load_custom_css()
@@ -103,36 +104,34 @@ class SafeSpectrumData:
             if sum_val > 0:
                 self.intensity = self.intensity / sum_val
 
-def read_spectrum_file_safe(file_path):
-    """Safely read spectrum file and return SafeSpectrumData object"""
+def read_spectrum_file_safe(file_or_path):
+    """Safely read spectrum file (file-like or path) and return SafeSpectrumData"""
     try:
-        # Try different separators
-        for sep in ['\t', ',', ' ', ';']:
-            try:
-                df = pd.read_csv(file_path, sep=sep, header=None, on_bad_lines='skip', encoding='utf-8')
-                if len(df.columns) >= 2:
-                    break
-            except:
-                continue
-        
+        # Accept file-like objects or paths
+        def _read_csv(src):
+            # sep=None with engine='python' lets pandas sniff delimiters safely
+            return pd.read_csv(src, sep=None, engine="python", header=None, on_bad_lines='skip', encoding='utf-8')
+
+        if hasattr(file_or_path, "read"):  # uploaded file-like
+            df = _read_csv(file_or_path)
+        else:  # path string
+            df = _read_csv(file_or_path)
+
         if len(df.columns) < 2:
-            st.error(f"Could not read file {file_path}")
-            return SafeSpectrumData([], [], os.path.basename(file_path))
-        
-        # Extract m/z and intensity columns
+            st.error(f"Could not read file {getattr(file_or_path, 'name', file_or_path)}")
+            return SafeSpectrumData([], [], os.path.basename(getattr(file_or_path, 'name', str(file_or_path))))
+
         mz_data = pd.to_numeric(df.iloc[:, 0], errors='coerce').dropna().values
         intensity_data = pd.to_numeric(df.iloc[:, 1], errors='coerce').dropna().values
-        
-        # Ensure same length
+
         min_len = min(len(mz_data), len(intensity_data))
         mz_data = mz_data[:min_len]
         intensity_data = intensity_data[:min_len]
-        
-        return SafeSpectrumData(mz_data, intensity_data, os.path.basename(file_path))
-    
+
+        return SafeSpectrumData(mz_data, intensity_data, os.path.basename(getattr(file_or_path, 'name', str(file_or_path))))
     except Exception as e:
-        st.error(f"Error reading {file_path}: {e}")
-        return SafeSpectrumData([], [], os.path.basename(file_path))
+        st.error(f"Error reading {getattr(file_or_path, 'name', file_or_path)}: {e}")
+        return SafeSpectrumData([], [], os.path.basename(getattr(file_or_path, 'name', str(file_or_path))))
 
 def apply_processing(spectrum_data, options):
     """Apply processing to spectrum data safely"""
@@ -234,10 +233,14 @@ def calculate_safe_y_limits(spectra_list, plot_type, custom_y_min=None, custom_y
     return float(y_min), float(y_max)
 
 def add_annotations_safe(ax, spectrum_data, annotations, y_max):
-    """Add annotations with safe Y positioning"""
+    """Add annotations with safe Y positioning and collect legend entries for automatic labels"""
     
     if not annotations or len(spectrum_data.intensity) == 0:
-        return
+        return [], []
+
+    legend_handles = []
+    legend_labels = []
+    seen_labels = set()
     
     max_intensity = spectrum_data.get_max_intensity()
     
@@ -301,6 +304,23 @@ def add_annotations_safe(ax, spectrum_data, annotations, y_max):
             mass = annotation['mass']
             charges = annotation['charge_states']
             threshold = annotation.get('threshold', 0.01)
+
+            # Add one legend entry per mass (once)
+            legend_label = f"{mass:.0f} Da"
+            if legend_label not in seen_labels:
+                handle = Line2D(
+                    [0], [0],
+                    marker=annotation.get('shape', 'o'),
+                    color=annotation.get('color', 'red'),
+                    linestyle='None',
+                    markerfacecolor=annotation.get('color', 'red'),
+                    markeredgecolor='black',
+                    markersize=8,
+                    label=legend_label
+                )
+                legend_handles.append(handle)
+                legend_labels.append(legend_label)
+                seen_labels.add(legend_label)
             
             for charge in charges:
                 mz = (mass + charge * 1.007276) / charge
@@ -359,6 +379,8 @@ def add_annotations_safe(ax, spectrum_data, annotations, y_max):
                         )
                     
                     ax.text(mz, label_y, label, **label_kwargs)
+    
+    return legend_handles, legend_labels
 
 def create_safe_plot(spectra_list, plot_settings, annotations, plot_type, spectrum_labels=None, vertical_lines=None, spectrum_colors=None):
     """Create plot with guaranteed safe Y-axis limits"""
@@ -545,11 +567,60 @@ def create_safe_plot(spectra_list, plot_settings, annotations, plot_type, spectr
         # Apply styling
         apply_plot_styling(current_ax, plot_settings, is_bottom=(i == len(axes)-1))
     
-    # Add annotations to first spectrum
+    # Add annotations to first spectrum and collect legend entries
+    legend_handles, legend_labels = [], []
     if annotations and len(filtered_spectra) > 0:
-        add_annotations_safe(axes[0], filtered_spectra[0], annotations, 
-                           y_max if plot_type != "mirror" else filtered_spectra[0].get_max_intensity() * min(plot_settings.get('zoom', 1.4), 10.0))
-    
+        handles, labels = add_annotations_safe(
+            axes[0], 
+            filtered_spectra[0], 
+            annotations, 
+            y_max if plot_type != "mirror" else filtered_spectra[0].get_max_intensity() * min(plot_settings.get('zoom', 1.4), 10.0)
+        )
+        legend_handles.extend(handles)
+        legend_labels.extend(labels)
+
+    # Render annotation key if requested
+    if plot_settings.get('show_annotation_legend', False) and legend_handles:
+        # Map UI position to matplotlib loc
+        loc_map = {
+            "Best": "best",
+            "Upper right": "upper right",
+            "Upper left": "upper left",
+            "Lower left": "lower left",
+            "Lower right": "lower right",
+            "Right": "right",
+            "Center left": "center left",
+            "Center right": "center right",
+            "Lower center": "lower center",
+            "Upper center": "upper center",
+            "Center": "center",
+        }
+        loc_choice = plot_settings.get('annotation_legend_loc', 'Best')
+        loc = loc_map.get(loc_choice, 'best')
+        bbox = (1.02, 1.0) if plot_settings.get('annotation_legend_outside', False) else None
+        loc_for_outside = 'upper left' if bbox else loc
+
+        # If an overlay legend was already drawn, add a second legend as an artist
+        if plot_type == "overlay" and plot_settings.get('show_legend', False):
+            leg2 = axes[0].legend(
+                handles=legend_handles,
+                labels=legend_labels,
+                loc=loc_for_outside,
+                frameon=plot_settings.get('annotation_legend_frame', True),
+                fontsize=plot_settings.get('annotation_legend_fontsize', 12),
+                bbox_to_anchor=bbox
+            )
+            axes[0].add_artist(leg2)
+        else:
+            axes[0].legend(
+                handles=legend_handles,
+                labels=legend_labels,
+                loc=loc_for_outside,
+                frameon=plot_settings.get('annotation_legend_frame', True),
+                fontsize=plot_settings.get('annotation_legend_fontsize', 12),
+                bbox_to_anchor=bbox
+            )
+
     # Add title if specified
     if plot_settings.get('title'):
         fig.suptitle(plot_settings['title'], fontsize=plot_settings.get('title_font_size', plot_settings['font_size'] + 2),
@@ -967,6 +1038,26 @@ else:
     legend_pos = "upper right"
     legend_frame = False
 
+# Safe default before the expander (prevents NameError)
+annotation_mode_for_expander = st.session_state.get("annotation_mode", "No annotations")
+
+# NEW: Annotation key controls (for automatic mass annotations)
+with st.expander("🔑 Annotation Key (Automatic Labels)", expanded=(annotation_mode_for_expander == "Automatic mass")):
+    show_annotation_legend = st.checkbox("Show annotation key", value=(annotation_mode_for_expander == "Automatic mass"))
+    col_a, col_b, col_c = st.columns(3)
+    with col_a:
+        annotation_legend_loc = st.selectbox(
+            "Key position",
+            ["Best", "Upper right", "Upper left", "Lower left", "Lower right", "Right",
+             "Center left", "Center right", "Lower center", "Upper center", "Center"],
+            index=0
+        )
+    with col_b:
+        annotation_legend_outside = st.checkbox("Place outside (right)", value=False)
+    with col_c:
+        annotation_legend_frame = st.checkbox("Show frame", value=True)
+    annotation_legend_fontsize = st.number_input("Key font size", 6, 24, 12)
+
 # File upload
 st.markdown('<h3 class="section-header">📁 File Upload</h3>', unsafe_allow_html=True)
 
@@ -1165,7 +1256,8 @@ annotations = []
 st.markdown('<h3 class="section-header">🏷️ Peak Annotations</h3>', unsafe_allow_html=True)
 
 annotation_mode = st.selectbox("Annotation mode:", 
-                              ["No annotations", "Manual peaks", "Automatic mass"])
+                              ["No annotations", "Manual peaks", "Automatic mass"],
+                              key="annotation_mode")  # <-- keep in session_state
 
 if annotation_mode == "Manual peaks":
     num_peaks = st.number_input("Number of peaks:", 0, 20, 0)
@@ -1292,20 +1384,11 @@ if uploaded_files and all(f is not None for f in uploaded_files):
     if st.button("🎨 Generate Plot", type="primary", key="generate_plot_main"):
         with st.spinner("Generating plot..."):
             try:
-                # Save files temporarily and read data
-                file_paths = []
-                for uploaded_file in uploaded_files:
-                    temp_path = f"temp_{uploaded_file.name}"
-                    with open(temp_path, "wb") as f:
-                        f.write(uploaded_file.getbuffer())
-                    file_paths.append(temp_path)
-                
-                # Read spectra
+                # Read spectra directly from uploaded files (no temp files)
                 spectra = []
-                for file_path in file_paths:
-                    spectrum = read_spectrum_file_safe(file_path)
+                for uploaded_file in uploaded_files:
+                    spectrum = read_spectrum_file_safe(uploaded_file)
                     if len(spectrum.intensity) > 0:
-                        # Apply processing
                         processing_options = {
                             'smoothing': smoothing,
                             'smooth_window': smooth_window,
@@ -1317,7 +1400,6 @@ if uploaded_files and all(f is not None for f in uploaded_files):
                         }
                         processed_spectrum = apply_processing(spectrum, processing_options)
                         spectra.append(processed_spectrum)
-                
                 if not spectra:
                     st.error("No valid spectra loaded")
                 else:
@@ -1382,6 +1464,12 @@ if uploaded_files and all(f is not None for f in uploaded_files):
                         'show_spectrum_numbers': show_spectrum_numbers,
                         'number_prefix': number_prefix,
                         'number_suffix': number_suffix,
+                        # NEW: annotation key settings
+                        'show_annotation_legend': show_annotation_legend,
+                        'annotation_legend_loc': annotation_legend_loc,
+                        'annotation_legend_outside': annotation_legend_outside,
+                        'annotation_legend_frame': annotation_legend_frame,
+                        'annotation_legend_fontsize': annotation_legend_fontsize,
                     }
                     
                     # Map plot type
@@ -1392,6 +1480,9 @@ if uploaded_files and all(f is not None for f in uploaded_files):
                         "Mirror Plot": "mirror"
                     }
                     
+                    # Optional custom per-spectrum colors (None by default)
+                    spectrum_colors = None
+
                     # Create plot
                     fig = create_safe_plot(spectra, plot_settings, annotations, 
                                          plot_type_map[plot_type], spectrum_labels, vertical_lines, spectrum_colors)
@@ -1437,12 +1528,7 @@ if uploaded_files and all(f is not None for f in uploaded_files):
                             st.download_button("🎨 Download SVG", buf_svg.getvalue(),
                                              f"{plot_type.lower().replace(' ', '_')}_plot.svg", "image/svg+xml")
                 
-                # Clean up
-                for file_path in file_paths:
-                    try:
-                        os.remove(file_path)
-                    except:
-                        pass
+                # Clean up: no temporary files to remove
                         
             except Exception as e:
                 st.error(f"Error: {str(e)}")

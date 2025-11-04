@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 from scipy.signal import find_peaks
 from scipy import integrate
 from sklearn.linear_model import LinearRegression
+import re
 
 from myutils import styling
 
@@ -689,6 +690,29 @@ class UI:
         scale_ranges = st.session_state.setdefault("scale_ranges", {})
         scale_factors = st.session_state.setdefault("scale_factors", {})
 
+        # --- Synchronize session state with current protein list ---
+        # Add missing proteins with defaults
+        for name in protein_names:
+            if name not in charge_ranges:
+                charge_ranges[name] = (2, 4)
+        # Remove proteins that are no longer present
+        for name in list(charge_ranges.keys()):
+            if name not in protein_names:
+                del charge_ranges[name]
+        # Prune stale entries in scale_* dicts
+        for k in list(scale_ranges.keys()):
+            prot = k[0] if isinstance(k, tuple) and len(k) >= 1 else None
+            if prot not in protein_names:
+                del scale_ranges[k]
+        for k in list(scale_factors.keys()):
+            prot = k[0] if isinstance(k, tuple) and len(k) >= 1 else None
+            if prot not in protein_names:
+                del scale_factors[k]
+
+        st.session_state["charge_ranges"] = charge_ranges
+        st.session_state["scale_ranges"] = scale_ranges
+        st.session_state["scale_factors"] = scale_factors
+
         # Controls section
         col1, col2, col3 = st.columns([2, 1, 1])
         
@@ -719,25 +743,29 @@ class UI:
 
         # Protein and charge selection
         selected_protein = st.selectbox("Select protein for integration setup", protein_names)
-        
+
+        # Use safe keys for widgets (avoid collisions with special chars)
+        safe_key = re.sub(r"[^0-9A-Za-z_]+", "_", selected_protein)
+        current_min, current_max = charge_ranges.get(selected_protein, (2, 4))
+
         col1, col2 = st.columns(2)
         with col1:
             min_charge = st.number_input(
-                f"Minimum charge for {selected_protein}", min_value=1, 
-                value=charge_ranges[selected_protein][0], key=f"min_charge_{selected_protein}"
+                f"Minimum charge for {selected_protein}", min_value=1,
+                value=current_min, key=f"min_charge_{safe_key}"
             )
         with col2:
             max_charge = st.number_input(
-                f"Maximum charge for {selected_protein}", min_value=min_charge, 
-                value=charge_ranges[selected_protein][1], key=f"max_charge_{selected_protein}"
+                f"Maximum charge for {selected_protein}", min_value=min_charge,
+                value=max(current_max, min_charge), key=f"max_charge_{safe_key}"
             )
-        
-        charge_ranges[selected_protein] = (min_charge, max_charge)
+
+        charge_ranges[selected_protein] = (int(min_charge), int(max_charge))
         st.session_state["charge_ranges"] = charge_ranges
 
         selected_charge = st.number_input(
-            f"Select charge state for {selected_protein}", min_value=min_charge, 
-            max_value=max_charge, value=min_charge, key=f"charge_{selected_protein}"
+            f"Select charge state for {selected_protein}", min_value=int(min_charge),
+            max_value=int(max_charge), value=int(min_charge), key=f"charge_{safe_key}"
         )
 
         # Load mass spectrum and show overview
@@ -758,16 +786,16 @@ class UI:
                 mz = (mass + PROTON_MASS * selected_charge) / selected_charge
                 
                 # Zoom control
-                show_zoomed = st.session_state.get(f"show_zoomed_{selected_protein}_{selected_charge}", True)
+                show_zoomed = st.session_state.get(f"show_zoomed_{safe_key}_{selected_charge}", True)
                 col1, col2, col3 = st.columns([2, 1, 1])
                 
                 with col2:
-                    if st.button("🔍 Toggle Zoom", key=f"zoom_{selected_protein}_{selected_charge}"):
-                        st.session_state[f"show_zoomed_{selected_protein}_{selected_charge}"] = not show_zoomed
+                    if st.button("🔍 Toggle Zoom", key=f"zoom_{safe_key}_{selected_charge}"):
+                        st.session_state[f"show_zoomed_{safe_key}_{selected_charge}"] = not show_zoomed
                         st.rerun()
                 
                 with col3:
-                    if st.button("🎯 Auto Range", key=f"auto_{selected_protein}_{selected_charge}"):
+                    if st.button("🎯 Auto Range", key=f"auto_{safe_key}_{selected_charge}"):
                         auto_min, auto_max = get_automatic_range(mz, auto_percent)
                         scale_ranges[(selected_protein, selected_charge)] = (auto_min, auto_max)
                         st.session_state["scale_ranges"] = scale_ranges
@@ -805,7 +833,7 @@ class UI:
                         value=current_range,
                         step=0.001,
                         format="%.3f",
-                        key=f"slider_{selected_protein}_{selected_charge}"
+                        key=f"slider_{safe_key}_{selected_charge}"
                     )
                     
                     st.write(f"Selected integration range: {selected_range[0]:.3f} - {selected_range[1]:.3f} m/z")
@@ -892,7 +920,17 @@ def main():
     
     # Clear cache button inside info card for consistent styling
     if st.button("🧹 Clear Cache & Restart App"):
-        import_tools.clear_cache()
+        # import_tools.clear_cache()
+        try:
+            st.cache_data.clear()
+        except Exception:
+            pass
+        try:
+            st.cache_resource.clear()
+        except Exception:
+            pass
+        st.session_state.clear()
+        st.rerun()
 
     # Step 1: Upload files
     drift_zip = UI.show_upload_section()

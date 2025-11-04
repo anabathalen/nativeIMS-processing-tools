@@ -14,7 +14,8 @@ def r_squared(y_true, y_pred):
     return 1 - (ss_res / ss_tot)
 
 # fit a single gaussian to a dataset, retrying with different initial guesses
-def fit_gaussian_with_retries(x_values, y_values, n_attempts = 10):
+def fit_gaussian_with_retries(x_values, y_values, n_attempts = 10, random_state=None):
+    rng = np.random.default_rng(random_state)
     best_r2 = -np.inf
     best_params = None
     best_fitted_values = None
@@ -24,8 +25,8 @@ def fit_gaussian_with_retries(x_values, y_values, n_attempts = 10):
         # picking a sensible set of starting values for the amplitude, mean and standard deviation of the gaussian fit as a starting point for fitting
         initial_guess = [
             max(y_values), # maximum y value
-            np.random.uniform(np.min(x_values), np.max(x_values)), # random value between the minimum and maximum x values
-            np.random.uniform(0.1 * np.std(x_values), 2 * np.std(x_values)) # random values between 0.1 and 2 x the standard deviation of the 
+            rng.uniform(np.min(x_values), np.max(x_values)), # random value between the minimum and maximum x values
+            rng.uniform(0.1 * np.std(x_values), 2 * np.std(x_values)) # random values between 0.1 and 2 x the standard deviation of the 
         ]
 
         try:

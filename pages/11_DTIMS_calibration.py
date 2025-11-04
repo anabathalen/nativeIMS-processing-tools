@@ -29,6 +29,7 @@ class PhysicalConstants:
     e: float = 1.602176634e-19     # Elementary charge (C)
     N_A: float = 6.02214076e23     # Avogadro's number
     da_to_kg: float = 1.66054e-27  # Dalton to kg conversion
+    pi: float = np.pi
 
 CONSTANTS = PhysicalConstants()
 
@@ -114,47 +115,59 @@ def calculate_ccs_mason_schamp(
     mass_analyte: float, 
     mass_buffer: float,
     charge: int = 1, 
-    length: float = 25.05
-) -> float:
+    length: float = 25.05,
+    return_mobility: bool = False
+) -> float | Tuple[float, float]:
     """
-    Calculate CCS using the Mason-Schamp equation
+    Calculate CCS (Å²) using the Mason–Schamp equation (correct form).
     
-    Parameters:
-    - drift_time: drift time in ms
-    - voltage: voltage in V
-    - temperature: temperature in K
-    - pressure: pressure in mbar
-    - mass_analyte: mass of analyte in Da
-    - mass_buffer: mass of buffer gas in Da
-    - charge: charge state
-    - length: drift tube length in cm (default 25.05 cm for Synapt)
+    Ω = (3 z e)/(16 N K) * sqrt( (2 π)/( μ k_B T ) )
+    
+    Where:
+      N = P / (k_B T)
+      K = L^2 / (V * t_d)
+    
+    Inputs:
+      drift_time : ms
+      voltage    : V
+      temperature: K
+      pressure   : mbar
+      length     : cm (drift region length)
     
     Returns:
-    - CCS in Å²
+      CCS in Å² (or (CCS, mobility) if return_mobility=True)
     """
-    # Convert units
-    drift_time_s = drift_time * 1e-3  # ms to s
-    length_m = length * 1e-2          # cm to m
-    pressure_Pa = pressure * 100      # mbar to Pa
-    
-    # Calculate reduced mass
-    reduced_mass = calculate_reduced_mass(mass_analyte, mass_buffer)
-    
-    # Calculate mobility
-    mobility = length_m / (voltage * drift_time_s)  # m²/(V·s)
-    
-    # Calculate number density of buffer gas
-    n_gas = pressure_Pa / (CONSTANTS.k_B * temperature)  # molecules/m³
-    
-    # Mason-Schamp equation
-    ccs_m2 = (
-        (3 * CONSTANTS.e * charge) / (16 * n_gas) * 
-        np.sqrt(2 * np.pi / (reduced_mass * CONSTANTS.k_B * temperature)) * 
-        (1 / mobility)
-    )
-    
-    # Convert to Å²
-    return ccs_m2 * 1e20
+    if (drift_time is None or voltage is None or
+        drift_time <= 0 or voltage <= 0 or
+        temperature <= 0 or pressure <= 0 or
+        mass_analyte <= 0 or mass_buffer <= 0):
+        return (np.nan, np.nan) if return_mobility else np.nan
+
+    # Unit conversions
+    t_s = drift_time * 1e-3          # ms -> s
+    L_m = length * 1e-2              # cm -> m
+    P_Pa = pressure * 100.0          # mbar -> Pa
+
+    # Reduced mass (kg)
+    mu = calculate_reduced_mass(mass_analyte, mass_buffer)
+
+    # Number density N (m^-3)
+    N = P_Pa / (CONSTANTS.k_B * temperature)
+
+    # Mobility (m^2 / (V·s))
+    K = (L_m * L_m) / (voltage * t_s)
+
+    if K <= 0 or not np.isfinite(K):
+        return (np.nan, np.nan) if return_mobility else np.nan
+
+    # Mason–Schamp (correct square root term)
+    prefactor = (3.0 * charge * CONSTANTS.e) / (16.0 * N * K)
+    sqrt_term = np.sqrt((2.0 * CONSTANTS.pi) / (mu * CONSTANTS.k_B * temperature))
+    ccs_m2 = prefactor * sqrt_term  # m^2
+
+    ccs_A2 = ccs_m2 * 1e20  # m^2 -> Å^2
+
+    return (ccs_A2, K) if return_mobility else ccs_A2
 
 def calculate_true_voltage(
     helium_cell_dc: float, 
@@ -166,41 +179,44 @@ def calculate_true_voltage(
     return (helium_cell_dc + bias) - (transfer_dc_entrance + helium_exit_dc)
 
 def perform_linear_regression(x_data: np.ndarray, y_data: np.ndarray) -> Dict[str, float]:
-    """Perform linear regression and return results"""
+    """Linear regression: y vs x"""
     reg = LinearRegression()
     reg.fit(x_data.reshape(-1, 1), y_data)
-    
     y_pred = reg.predict(x_data.reshape(-1, 1))
     r2 = r2_score(y_data, y_pred)
-    
     return {
-        'gradient': reg.coef_[0],
+        'gradient': reg.coef_[0],   # slope (Δy / Δx)
         'intercept': reg.intercept_,
         'r2': r2,
         'y_pred': y_pred
     }
 
 def create_calibration_plot(valid_data: pd.DataFrame, regression_results: Dict[str, float]) -> plt.Figure:
-    """Create calibration plot"""
-    fig, ax = plt.subplots(figsize=(10, 6))
-    
-    # Plot data points
-    ax.scatter(valid_data['Voltage_Inverse'], valid_data['Max_Drift_Time'], 
-              color='blue', s=100, alpha=0.7, label='Data Points')
-    
-    # Plot regression line
-    x_line = np.linspace(valid_data['Voltage_Inverse'].min(), 
-                        valid_data['Voltage_Inverse'].max(), 100)
+    """
+    Plot: x = Drift Time (ms), y = 1/Voltage (V⁻¹)
+    Regression performed on (Drift Time -> 1/Voltage)
+    """
+    fig, ax = plt.subplots(figsize=(8, 6))
+
+    # Scatter
+    ax.scatter(valid_data['Max_Drift_Time'],
+               valid_data['Voltage_Inverse'],
+               color='blue', s=100, alpha=0.75, edgecolors='black', linewidth=0.5,
+               label='Data Points')
+
+    # Fit line
+    x_line = np.linspace(valid_data['Max_Drift_Time'].min(),
+                         valid_data['Max_Drift_Time'].max(), 200)
     y_line = regression_results['gradient'] * x_line + regression_results['intercept']
-    ax.plot(x_line, y_line, 'r-', linewidth=2, 
-            label=f'Fit: y = {regression_results["gradient"]:.6f}x + {regression_results["intercept"]:.6f}')
-    
-    ax.set_xlabel('1/Voltage (V⁻¹)')
-    ax.set_ylabel('Drift Time (ms)')
-    ax.set_title(f'DTIMS Calibration Plot (R² = {regression_results["r2"]:.6f})')
-    ax.legend()
+    ax.plot(x_line, y_line, 'r-', lw=2,
+            label=f'Fit: y = {regression_results["gradient"]:.6g}x + {regression_results["intercept"]:.6g}')
+
+    ax.set_xlabel('Drift Time (ms)')
+    ax.set_ylabel('1 / Voltage (V⁻¹)')
+    ax.set_title(f'Calibration: 1/V vs Drift Time (R² = {regression_results["r2"]:.6f})')
     ax.grid(True, alpha=0.3)
-    
+    ax.legend()
+    plt.tight_layout()
     return fig
 
 def create_ccs_voltage_plot(ccs_data: pd.DataFrame) -> plt.Figure:
@@ -353,19 +369,22 @@ if st.session_state.data_uploaded:
         st.info("👆 Please enter the analyte mass above to enable data processing.")
     
     if st.button("🔬 Process Data and Calculate Calibration", type="primary", disabled=process_disabled):
-        # Find maximum drift times and intensities
         results_data = []
-        
+        zero_voltage_files = []
+
         for file_col, params in file_params.items():
             max_drift, max_intensity = find_max_drift_time(st.session_state.df, file_col)
-            
             if max_drift is not None:
                 true_voltage = calculate_true_voltage(
                     params['helium_cell_dc'], params['bias'],
                     transfer_dc_entrance, helium_exit_dc
                 )
-                voltage_inverse = 1 / true_voltage if true_voltage != 0 else np.nan
-                
+                if true_voltage == 0:
+                    zero_voltage_files.append(params['raw_file'])
+                    voltage_inverse = np.nan
+                else:
+                    voltage_inverse = 1.0 / true_voltage
+
                 results_data.append({
                     'File': params['raw_file'],
                     'Column': file_col,
@@ -376,78 +395,132 @@ if st.session_state.data_uploaded:
                     'True_Voltage': true_voltage,
                     'Voltage_Inverse': voltage_inverse
                 })
-        
+
+        if zero_voltage_files:
+            st.warning("These files have zero true voltage (CCS cannot be computed, values set NaN): " +
+                       ", ".join(zero_voltage_files))
+
         results_df = pd.DataFrame(results_data)
-        
-        # Filter out invalid data
         valid_data = results_df.dropna(subset=['Voltage_Inverse', 'Max_Drift_Time'])
-        
+
         if len(valid_data) >= 2:
-            # Perform linear regression
+            # NOTE: Regression now: y = 1/V, x = Drift Time
             regression_results = perform_linear_regression(
-                valid_data['Voltage_Inverse'].values,
-                valid_data['Max_Drift_Time'].values
+                valid_data['Max_Drift_Time'].values,
+                valid_data['Voltage_Inverse'].values
             )
-            
-            # Store calibration results
+
             st.session_state.calibration_results = {
                 **regression_results,
                 'results_df': results_df,
                 'valid_data': valid_data
             }
-            
-            # Display results
+
             st.markdown('<div class="section-header">📊 Calibration Results</div>', unsafe_allow_html=True)
-            
             col1, col2, col3 = st.columns(3)
             with col1:
-                st.metric("Gradient (td)", f"{regression_results['gradient']:.6f}")
+                st.metric("Slope (Δ(1/V)/Δt)", f"{regression_results['gradient']:.6g}")
             with col2:
-                st.metric("Intercept (t0)", f"{regression_results['intercept']:.6f}")
+                st.metric("Intercept", f"{regression_results['intercept']:.6g}")
             with col3:
-                st.metric("R² Value", f"{regression_results['r2']:.6f}")
-            
-            # Create and display calibration plot
+                st.metric("R²", f"{regression_results['r2']:.6f}")
+
             fig = create_calibration_plot(valid_data, regression_results)
             st.pyplot(fig)
-            
-            # Display detailed results table
-            st.markdown("### Detailed Results")
+
+            st.markdown("### Drift Time / Voltage Summary (Apex Points)")
             st.dataframe(results_df, use_container_width=True)
-            
-            # Calculate CCS values for ALL drift times and voltages
-            st.markdown('<div class="section-header">🧮 CCS Calculations (All Data Points)</div>', unsafe_allow_html=True)
-            
-            # CCS calculation parameters
-            col1, col2 = st.columns(2)
-            with col1:
+
+            # =========================
+            # CCS CALCULATIONS SECTION
+            # =========================
+            st.markdown('<div class="section-header">🧮 Apex CCS Values</div>', unsafe_allow_html=True)
+            colA, colB = st.columns(2)
+            with colA:
                 charge_state = st.number_input("Charge State", value=1, min_value=1)
-            with col2:
-                st.info(f"Using Mason-Schamp equation with:\n"
-                        f"- Buffer gas: {buffer_gas} ({BUFFER_GASES[buffer_gas]['mass']} Da)\n"
-                        f"- Drift tube length: 25.05 cm")
-            
-            # Calculate CCS for ALL drift times across all files and voltages
-            all_ccs_data = []
+            with colB:
+                st.info("Apex CCS uses each file's maximum intensity drift time and true voltage.")
+
             buffer_mass = BUFFER_GASES[buffer_gas]['mass']
-            
-            for file_col, params in file_params.items():
-                # Get all non-zero drift times and intensities for this file
-                file_data = st.session_state.df[st.session_state.df[file_col] > 0].copy()
-                
-                if not file_data.empty:
-                    true_voltage = calculate_true_voltage(
-                        params['helium_cell_dc'], params['bias'],
-                        transfer_dc_entrance, helium_exit_dc
+
+            # Compute CCS for each apex (max drift time per file)
+            apex_ccs_rows = []
+            for _, row in results_df.iterrows():
+                td = row['Max_Drift_Time']
+                V = row['True_Voltage']
+                if np.isfinite(td) and V is not None and V > 0:
+                    apex_ccs = calculate_ccs_mason_schamp(
+                        drift_time=td,
+                        voltage=abs(V),
+                        temperature=temperature,
+                        pressure=pressure,
+                        mass_analyte=mass_analyte,
+                        mass_buffer=buffer_mass,
+                        charge=charge_state
                     )
-                    
-                    for _, row in file_data.iterrows():
-                        drift_time = row['Time']
-                        intensity = row[file_col]
-                        
-                        # Calculate CCS using Mason-Schamp equation
-                        ccs_value = calculate_ccs_mason_schamp(
-                            drift_time=drift_time,
+                else:
+                    apex_ccs = np.nan
+
+                apex_ccs_rows.append({
+                    'File': row['File'],
+                    'Max_Drift_Time (ms)': td,
+                    'True_Voltage (V)': V,
+                    '1/Voltage (V⁻¹)': (1.0 / V) if V not in (0, None) else np.nan,
+                    'Apex_Intensity': row['Max_Intensity'],
+                    'Helium_Cell_DC': row['Helium_Cell_DC'],
+                    'Bias': row['Bias'],
+                    'Charge': charge_state,
+                    'Apex_CCS (Å²)': apex_ccs
+                })
+
+            apex_ccs_df = pd.DataFrame(apex_ccs_rows)
+            st.dataframe(apex_ccs_df, use_container_width=True)
+
+            # Download apex CCS table
+            apex_csv = apex_ccs_df.to_csv(index=False)
+            st.download_button(
+                "📥 Download Apex CCS Table (CSV)",
+                data=apex_csv,
+                file_name=f"dtims_apex_ccs_{buffer_gas.lower()}.csv",
+                mime="text/csv"
+            )
+
+            # =========================
+            # FULL DATASET CCS
+            # =========================
+            st.markdown('<div class="section-header">📈 Full Dataset CCS Conversion</div>', unsafe_allow_html=True)
+            st.caption("All drift times for every file converted to CCS (long format).")
+
+            all_ccs_data = []
+            skipped_ccs = 0
+
+            # Iterate each file (column) and compute CCS for every non-zero intensity drift time
+            for file_col, params in file_params.items():
+                file_signal = st.session_state.df[['Time', file_col]].copy()
+                file_signal = file_signal[file_signal[file_col] > 0]  # keep positive intensities
+                if file_signal.empty:
+                    continue
+
+                true_voltage = calculate_true_voltage(
+                    params['helium_cell_dc'], params['bias'],
+                    transfer_dc_entrance, helium_exit_dc
+                )
+
+                if true_voltage is None or true_voltage <= 0:
+                    skipped_ccs += len(file_signal)
+                    continue
+
+                inv_voltage = 1.0 / true_voltage if true_voltage != 0 else np.nan
+
+                for _, r in file_signal.iterrows():
+                    td = r['Time']
+                    intensity = r[file_col]
+
+                    if td <= 0:
+                        ccs_val = np.nan
+                    else:
+                        ccs_val = calculate_ccs_mason_schamp(
+                            drift_time=td,
                             voltage=abs(true_voltage),
                             temperature=temperature,
                             pressure=pressure,
@@ -455,107 +528,37 @@ if st.session_state.data_uploaded:
                             mass_buffer=buffer_mass,
                             charge=charge_state
                         )
-                        
-                        all_ccs_data.append({
-                            'Charge': charge_state,
-                            'Drift': drift_time,
-                            'CCS': ccs_value,
-                            'True_Voltage': true_voltage,
-                            'Intensity': intensity,
-                            'File': params['raw_file']
-                        })
-            
-            # Create comprehensive CCS DataFrame
-            comprehensive_ccs_df = pd.DataFrame(all_ccs_data)
-            
-            if not comprehensive_ccs_df.empty:
-                # Remove any invalid CCS values
-                comprehensive_ccs_df = comprehensive_ccs_df.dropna(subset=['CCS'])
-                comprehensive_ccs_df = comprehensive_ccs_df[np.isfinite(comprehensive_ccs_df['CCS'])]
-                
-                st.markdown("### Complete CCS Dataset")
-                st.dataframe(comprehensive_ccs_df, use_container_width=True)
-                
-                # Create output DataFrame
-                output_df = comprehensive_ccs_df[['Charge', 'Drift', 'CCS', 'True_Voltage', 'Intensity']].copy()
-                
-                # Create download button
-                csv_buffer = io.StringIO()
-                output_df.to_csv(csv_buffer, index=False)
-                csv_string = csv_buffer.getvalue()
-                
+
+                    all_ccs_data.append({
+                        'File': params['raw_file'],
+                        'Time (ms)': td,
+                        'Intensity': intensity,
+                        'True_Voltage (V)': true_voltage,
+                        '1/Voltage (V⁻¹)': inv_voltage,
+                        'Helium_Cell_DC': params['helium_cell_dc'],
+                        'Bias': params['bias'],
+                        'Charge': charge_state,
+                        'CCS (Å²)': ccs_val
+                    })
+
+            if skipped_ccs > 0:
+                st.warning(f"Skipped {skipped_ccs} drift points (non-positive true voltage).")
+
+            full_ccs_df = pd.DataFrame(all_ccs_data)
+
+            if full_ccs_df.empty:
+                st.error("No CCS values computed (check voltages and intensities).")
+            else:
+                st.dataframe(full_ccs_df, use_container_width=True, height=400)
+
+                # Download full CCS dataset
+                full_csv = full_ccs_df.to_csv(index=False)
                 st.download_button(
-                    label="📥 Download Complete Calibrated Data (CSV)",
-                    data=csv_string,
-                    file_name=f"dtims_complete_calibrated_data_{buffer_gas.lower()}.csv",
+                    "📥 Download Full CCS Dataset (CSV)",
+                    data=full_csv,
+                    file_name=f"dtims_full_ccs_{buffer_gas.lower()}.csv",
                     mime="text/csv"
                 )
-                
-                # Summary statistics
-                st.markdown("### Summary Statistics")
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.metric("Total Data Points", len(output_df))
-                with col2:
-                    st.metric("Average CCS (Å²)", f"{output_df['CCS'].mean():.2f}")
-                
-                # Create compact table for max intensity CCS at each voltage
-                st.markdown("### CCS at Maximum Intensity (by Voltage)")
-                max_intensity_data = []
-                
-                for file_col, params in file_params.items():
-                    file_data = st.session_state.df[st.session_state.df[file_col] > 0]
-                    if not file_data.empty:
-                        max_idx = file_data[file_col].idxmax()
-                        max_drift = file_data.loc[max_idx, 'Time']
-                        max_intensity = file_data.loc[max_idx, file_col]
-                        
-                        true_voltage = calculate_true_voltage(
-                            params['helium_cell_dc'], params['bias'],
-                            transfer_dc_entrance, helium_exit_dc
-                        )
-                        
-                        ccs_max = calculate_ccs_mason_schamp(
-                            drift_time=max_drift,
-                            voltage=abs(true_voltage),
-                            temperature=temperature,
-                            pressure=pressure,
-                            mass_analyte=mass_analyte,
-                            mass_buffer=buffer_mass,
-                            charge=charge_state
-                        )
-                        
-                        max_intensity_data.append({
-                            'File': params['raw_file'],
-                            'Voltage (V)': true_voltage,
-                            'Max Drift Time (ms)': max_drift,
-                            'Max Intensity': max_intensity,
-                            'CCS (Å²)': ccs_max
-                        })
-                
-                max_intensity_df = pd.DataFrame(max_intensity_data)
-                
-                if not max_intensity_df.empty:
-                    st.dataframe(max_intensity_df, use_container_width=True)
-                    
-                    # Plot CCS vs Voltage
-                    fig = create_ccs_voltage_plot(max_intensity_df)
-                    st.pyplot(fig)
-                
-                # Show file-wise summary
-                st.markdown("### File-wise Summary")
-                file_summary = comprehensive_ccs_df.groupby('File').agg({
-                    'CCS': ['count', 'mean'],
-                    'True_Voltage': 'first',
-                    'Intensity': 'sum'
-                }).round(2)
-                
-                file_summary.columns = ['Data_Points', 'Mean_CCS', 'True_Voltage', 'Total_Intensity']
-                st.dataframe(file_summary, use_container_width=True)
-        
-        else:
-            st.error("Not enough valid data points for calibration. Need at least 2 data points.")
-
 # Information section
 st.markdown('<div class="section-header">ℹ️ Information</div>', unsafe_allow_html=True)
 
@@ -569,9 +572,9 @@ with st.expander("How to use this tool"):
     6. **Process the data** - The tool will:
        - Find the drift time with maximum intensity for each file (for calibration plot)
        - Calculate the true voltage: (Helium Cell DC + Bias) - (Transfer DC Entrance + Helium Exit DC)
-       - Plot drift time vs. 1/voltage and fit a linear regression for calibration verification
-       - Calculate CCS for ALL drift times using the Mason-Schamp equation
-       - Generate a downloadable CSV with complete calibrated data (Charge, Drift, CCS, True_Voltage, Intensity)
+       - Show both td vs 1/V (traditional) and td vs V (direct) relationships
+       - Calculate CCS for ALL drift times using the corrected Mason-Schamp equation
+       - Generate a downloadable CSV with complete calibrated data
     """)
 
 with st.expander("About the calculations"):
@@ -581,20 +584,24 @@ with st.expander("About the calculations"):
     True Voltage = (Helium Cell DC + Bias) - (Transfer DC Entrance + Helium Exit DC)
     ```
     
-    **Mason-Schamp CCS Calculation:**
+    **Corrected Mason-Schamp CCS Calculation:**
     ```
-    CCS = (3 × e × z) / (16 × N₀) × √(2π / (μ × k_B × T)) × (1 / K₀)
+    CCS = (3 * e * z)/(16 * N) * sqrt(2 * π * μ * k_B * T) * (1 / K)
     ```
     
     Where:
     - `e` = elementary charge (1.602 × 10⁻¹⁹ C)
     - `z` = charge state
-    - `N₀` = number density of buffer gas
+    - `N` = number density of buffer gas = P/(kT)
     - `μ` = reduced mass of analyte-buffer gas system
-    - `k_B` = Boltzmann constant (1.381 × 10⁻²³ J/K)
+    - `k` = Boltzmann constant (1.381 × 10⁻²³ J/K)
     - `T` = temperature (K)
-    - `K₀` = mobility = L/(V×t_d)
+    - `K` = mobility = L²/(V×td) [corrected formula]
     - `L` = drift tube length (25.05 cm for Synapt)
+    
+    **Key Correction:**
+    - Mobility: K₀ = L²/(V×td) instead of L/(V×td)
+    - This ensures the proper linear relationship: td ∝ V
     
     **Reduced Mass Calculation:**
     ```
@@ -606,17 +613,18 @@ with st.expander("About the calculations"):
     - Nitrogen (N₂): 28.014 Da
     """)
 
-with st.expander("Buffer Gas Selection"):
+with st.expander("Linear Relationships"):
     st.markdown("""
-    **Helium (He):**
-    - Mass: 4.002602 Da
-    - Most commonly used buffer gas in DTIMS
-    - Provides high resolution and sensitivity
+    **Expected Linear Relationships:**
     
-    **Nitrogen (N₂):**
-    - Mass: 28.014 Da
-    - Alternative buffer gas
-    - Different collision cross-section behavior compared to helium
+    1. **td vs 1/V (Traditional Calibration):**
+       - From the relationship: td = (L²/K₀) × (1/V) + t₀
+       - Should give a straight line when plotting td vs 1/V
+       - Slope = L²/K₀, Intercept = t₀
     
-    The tool automatically uses the correct mass in the Mason-Schamp equation based on your selection.
+    2. **td vs V (Direct Relationship):**
+       - For constant mobility: td ∝ 1/V, so td vs V should be approximately linear for small voltage ranges
+       - Useful for verification of instrumental stability
+    
+    The tool now shows both relationships to help verify your calibration.
     """)

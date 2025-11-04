@@ -775,7 +775,13 @@ class CCSDDataProcessor:
     def create_summed_data(df):
         """Create summed data across charge states"""
         from scipy.interpolate import interp1d
-        
+
+        # Clean inputs
+        df = df.copy()
+        df['CCS'] = pd.to_numeric(df['CCS'], errors='coerce')
+        df['Scaled_Intensity'] = pd.to_numeric(df['Scaled_Intensity'], errors='coerce')
+        df = df.dropna(subset=['CCS', 'Scaled_Intensity'])
+
         ccs_min, ccs_max = df['CCS'].min(), df['CCS'].max()
         ccs_range = np.linspace(ccs_min, ccs_max, 1000)
         summed_intensity = np.zeros_like(ccs_range)
@@ -1332,7 +1338,24 @@ def main():
     try:
         # Load and validate data
         df = pd.read_csv(uploaded_file)
-        
+
+        # Ensure numeric types and clean data
+        if 'CCS' in df.columns:
+            # Remove thousand separators and coerce to float
+            df['CCS'] = pd.to_numeric(df['CCS'].astype(str).str.replace(',', ''), errors='coerce')
+        if 'Scaled_Intensity' in df.columns:
+            df['Scaled_Intensity'] = pd.to_numeric(df['Scaled_Intensity'], errors='coerce')
+        if 'Charge' in df.columns:
+            df['Charge'] = pd.to_numeric(df['Charge'], errors='coerce', downcast='integer')
+
+        # Drop invalid rows
+        df = df.dropna(subset=['Charge', 'CCS', 'Scaled_Intensity'])
+
+        # Optional: remove clearly out-of-range CCS (guardrail)
+        # Keep within min/max of valid data, no extrapolation
+        # q_low, q_high = df['CCS'].quantile([0.001, 0.999])
+        # df = df[(df['CCS'] >= q_low) & (df['CCS'] <= q_high)]
+
         required_cols = ['Charge', 'CCS', 'Scaled_Intensity']
         missing_cols = [col for col in required_cols if col not in df.columns]
         
@@ -1350,6 +1373,50 @@ def main():
         
         if not has_export_cols:
             st.warning("Missing Drift and/or m/z columns. Export will use default values.")
+        
+        # --- NEW: CCS range + export resolution controls ---
+        ccs_min_raw = float(df['CCS'].min())
+        ccs_max_raw = float(df['CCS'].max())
+
+        with st.sidebar.expander("🧪 CCS Range / Export Settings", expanded=True):
+            if 'fit_ccs_min' not in st.session_state:
+                st.session_state['fit_ccs_min'] = ccs_min_raw
+            if 'fit_ccs_max' not in st.session_state:
+                st.session_state['fit_ccs_max'] = ccs_max_raw
+
+            fit_ccs_min = st.number_input(
+                "Min CCS to fit",
+                min_value=ccs_min_raw,
+                max_value=ccs_max_raw,
+                value=float(st.session_state['fit_ccs_min']),
+                step=max((ccs_max_raw-ccs_min_raw)/1000, 0.01)
+            )
+            fit_ccs_max = st.number_input(
+                "Max CCS to fit",
+                min_value=fit_ccs_min,
+                max_value=ccs_max_raw,
+                value=float(st.session_state['fit_ccs_max']),
+                step=max((ccs_max_raw-ccs_min_raw)/1000, 0.01)
+            )
+
+            st.session_state['fit_ccs_min'] = fit_ccs_min
+            st.session_state['fit_ccs_max'] = fit_ccs_max
+
+            export_points = st.number_input(
+                "Export points per charge",
+                min_value=100,
+                max_value=5000,
+                value=1000,
+                step=100,
+                help="Number of evenly spaced CCS points for each charge in exported fitted data",
+                key="export_points_per_charge"
+            )
+
+        # Apply CCS cropping (no extrapolation)
+        df = df[(df['CCS'] >= st.session_state['fit_ccs_min']) & (df['CCS'] <= st.session_state['fit_ccs_max'])]
+        if df.empty:
+            st.error("No data remain after applying the selected CCS range.")
+            return
         
         # Sidebar controls
         st.sidebar.markdown("### 🎛️ Analysis Configuration")
@@ -1805,6 +1872,7 @@ def main():
                 
                 fig.add_trace(go.Scatter(
                     x=x_data, y=peak_curve, mode='lines',
+                   
                     name=f'Peak {i+1}',
                     line=dict(color=colors[i % len(colors)], width=2, dash='dash'),
                     opacity=0.8
@@ -1817,7 +1885,8 @@ def main():
                 height=600,
                 hovermode='x unified'
             )
-            
+            # Lock x-axis to data bounds
+            fig.update_xaxes(range=[float(np.nanmin(x_data)), float(np.nanmax(x_data))])
             st.plotly_chart(fig, use_container_width=True)
             
             # Residuals plot
@@ -1842,7 +1911,8 @@ def main():
                 yaxis_title='Residual',
                 height=400
             )
-            
+            # Lock residuals x-axis too
+            fig_residuals.update_xaxes(range=[float(np.nanmin(x_data)), float(np.nanmax(x_data))])
             st.plotly_chart(fig_residuals, use_container_width=True)
         
         # Export section - moved outside the fit_result check
@@ -1855,49 +1925,62 @@ def main():
             
             # Create combined export data
             def create_export_data():
-                """Create export data in the required format"""
+                """Create export data in the required format (high‑resolution per charge)"""
                 export_rows = []
                 original_df = st.session_state.get('original_df', df)
-                
+
+                # User controls already stored in session_state
+                export_points_target = int(st.session_state.get('export_points_per_charge', 1000))
+                fit_ccs_min = float(st.session_state.get('fit_ccs_min', original_df['CCS'].min()))
+                fit_ccs_max = float(st.session_state.get('fit_ccs_max', original_df['CCS'].max()))
+
                 for charge, saved_result in st.session_state['all_charge_results'].items():
-                    # Get original data for this charge state
-                    charge_data = original_df[original_df['Charge'] == charge].copy().sort_values('CCS')
-                    
-                    # Get fitted parameters and create fitted curve
+                    charge_data = original_df[original_df['Charge'] == charge].copy()
+                    if charge_data.empty:
+                        continue
+
+                    # Restrict to user-selected global CCS window (safety)
+                    charge_data = charge_data[
+                        (charge_data['CCS'] >= fit_ccs_min) & (charge_data['CCS'] <= fit_ccs_max)
+                    ].sort_values('CCS')
+                    if charge_data.empty:
+                        continue
+
                     fit_result = saved_result['fit_result']
                     peak_stats = saved_result['peak_stats']
                     fitting_options = saved_result['fitting_options']
-                    
-                    # Get CCS range for this charge state
-                    ccs_min, ccs_max = charge_data['CCS'].min(), charge_data['CCS'].max()
-                    
-                    # Create evenly distributed x values (same number of points as original data)
-                    n_points = len(charge_data)
+
+                    # Local bounds within (possibly cropped) data
+                    ccs_min = charge_data['CCS'].min()
+                    ccs_max = charge_data['CCS'].max()
+
+                    # High-resolution sampling: at least original points, else user target
+                    n_points = max(len(charge_data), export_points_target)
                     x_new = np.linspace(ccs_min, ccs_max, n_points)
-                    
-                    # Calculate fitted curve at new x values
-                    fitted_curve = multi_peak_function(x_new, fitting_options['peak_type'], *fit_result['parameters'])
-                    
-                    # Normalize fitted curve within this charge state (0 to 1)
-                    max_fitted = np.max(fitted_curve) if np.max(fitted_curve) > 0 else 1
+
+                    fitted_curve = multi_peak_function(
+                        x_new,
+                        fitting_options['peak_type'],
+                        *fit_result['parameters']
+                    )
+
+                    # Normalize within this charge
+                    max_fitted = np.max(fitted_curve) if np.max(fitted_curve) > 0 else 1.0
                     normalized_intensity = fitted_curve / max_fitted
-                    
-                    # Get peak parameters for standard deviation calculation
+
                     params_per_peak = {
                         "Gaussian": 3, "Lorentzian": 3, "Voigt": 4, "BiGaussian": 4, "EMG": 4
                     }.get(fitting_options['peak_type'], 3)
-                    
                     n_peaks = len(fit_result['parameters']) // params_per_peak
-                    
-                    # Get default m/z value
-                    default_mz = charge_data['m/z'].iloc[0] if 'm/z' in charge_data.columns else 1840.2934353393
-                    
-                    # For each data point, use the distributed CCS value but find closest peak for std dev
-                    for i, (ccs_val, fitted_val, norm_val) in enumerate(zip(x_new, fitted_curve, normalized_intensity)):
-                        # Find closest peak for standard deviation calculation
+
+                    default_mz = (charge_data['m/z'].iloc[0]
+                                  if 'm/z' in charge_data.columns and not charge_data['m/z'].isna().all()
+                                  else 1840.2934353393)
+
+                    for ccs_val, fitted_val, norm_val in zip(x_new, fitted_curve, normalized_intensity):
+                        # Closest peak center for local std dev estimate
                         closest_peak_idx = 0
                         min_distance = float('inf')
-                        
                         for peak_idx in range(n_peaks):
                             peak_center = fit_result['parameters'][peak_idx * params_per_peak + 1]
                             distance = abs(ccs_val - peak_center)
@@ -1905,28 +1988,27 @@ def main():
                                 min_distance = distance
                                 closest_peak_idx = peak_idx
 
-                        # Get peak standard deviation from closest peak
                         if closest_peak_idx < len(peak_stats):
                             peak_stat = peak_stats[closest_peak_idx]
-                            peak_std = peak_stat['fwhm'] / 2.355  # Convert FWHM to standard deviation
+                            peak_std = peak_stat['fwhm'] / 2.355 if peak_stat['fwhm'] > 0 else 0.0
                         else:
-                            # Fallback to parameter values
+                            # Fallbacks by peak type
                             if fitting_options['peak_type'] == "Gaussian":
                                 peak_std = fit_result['parameters'][closest_peak_idx * params_per_peak + 2]
                             elif fitting_options['peak_type'] == "Lorentzian":
-                                peak_std = fit_result['parameters'][closest_peak_idx * params_per_peak + 2] / 2
+                                peak_std = fit_result['parameters'][closest_peak_idx * params_per_peak + 2] / 2.0
                             else:
                                 peak_std = 0.0
-                        
+
                         export_rows.append({
                             'Charge': int(charge),
-                            'CCS': ccs_val,  # Use the distributed CCS value, not peak center
+                            'CCS': ccs_val,
                             'CCS Std.Dev.': peak_std,
                             'Normalized_Intensity': norm_val,
                             'Scaled_Intensity': fitted_val,
                             'm/z': default_mz
                         })
-                
+
                 return pd.DataFrame(export_rows)
 
             # Also save Gaussian parameters separately
@@ -2130,6 +2212,24 @@ def main():
                     f"fit_data_{st.session_state['data_label'].lower().replace(' ', '_')}.csv",
                     "text/csv"
                 )
+        
+        # High-resolution fitted curve (optional)
+        if st.checkbox("Generate high-resolution current fit export", value=True):
+            export_points_target = int(st.session_state.get('export_points_per_charge', 1000))
+            x_hr = np.linspace(x_data.min(), x_data.max(), max(len(x_data), export_points_target))
+            y_hr = multi_peak_function(x_hr, fitting_options['peak_type'], *result['parameters'])
+            hr_df = pd.DataFrame({
+                'CCS': x_hr,
+                'Fitted': y_hr
+            })
+            csv_fit_hr = hr_df.to_csv(index=False)
+            st.download_button(
+                "📈 Download High-Resolution Fitted Curve",
+                csv_fit_hr,
+                f"fit_data_highres_{st.session_state['data_label'].lower().replace(' ', '_')}.csv",
+                "text/csv"
+            )
+        
         else:
             st.info("No results available for export. Complete peak fitting to enable export options.")
     

@@ -4,1161 +4,897 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy.interpolate import griddata
 from scipy.signal import savgol_filter
+from scipy.ndimage import gaussian_filter
 import matplotlib.colors as mcolors
 import seaborn as sns
 from io import BytesIO
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Tuple, Optional, Dict, Any, List, Union
-from pathlib import Path
-from sklearn.preprocessing import normalize
-from scipy.ndimage import gaussian_filter
-from enum import Enum
-from contextlib import contextmanager
-from functools import lru_cache
-import hashlib
-import pickle
+import warnings
+from copy import deepcopy
 
-from myutils import styling, import_tools
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+warnings.filterwarnings("ignore", category=RuntimeWarning)
 
-# Enums for better type safety
-class InstrumentType(Enum):
-    SYNAPT = "Synapt"
-    CYCLIC = "Cyclic"
-
-class SmoothingType(Enum):
-    SAVGOL = "savgol"
-    GAUSSIAN = "gaussian"
-
-class InterpolationMethod(Enum):
-    CUBIC = "cubic"
-    LINEAR = "linear"
-    NEAREST = "nearest"
-
-class PlotType(Enum):
-    HEATMAP = "heatmap"
-    STACKED = "stacked"
-
-class ColorMapType(Enum):
-    STANDARD = "Standard"
-    COLORBLIND = "Seaborn Colorblind"
+# Import styling utilities if available
+try:
+    from myutils import styling
+except ImportError:
+    styling = None
 
 @dataclass
-class AppConfig:
-    """Centralized application configuration"""
-    MAX_FILE_SIZE_MB: int = 100
-    DEFAULT_GRID_RESOLUTION: int = 200
-    DEFAULT_DPI: int = 300
-    CACHE_SIZE: int = 32
-    CHUNK_SIZE: int = 10000
-
-@dataclass
-class ProcessingSettings:
-    """Configuration for CIU data processing"""
-    data_type: InstrumentType
-    charge_state: int
-    inject_time: Optional[float] = None
-
-@dataclass
-class HeatmapSettings:
-    """Configuration for heatmap visualization - FIXED argument order"""
-    x_min: float
-    x_max: float
-    y_min: float
-    y_max: float
-    normalize_data: bool
-    interpolation_method: str
-    grid_resolution: int
-    apply_smoothing: bool
-    # All optional parameters with defaults
-    x_grid_resolution: Optional[int] = None
-    y_grid_resolution: Optional[int] = None
-    smoothing_type: str = 'savgol'
-    window_length: int = 11
-    poly_order: int = 3
+class ORIGAMISettings:
+    """ORIGAMI-style configuration settings"""
+    # Grid and interpolation
+    grid_resolution: int = 200
+    interpolation_method: str = 'cubic'
+    
+    # Normalization and processing
+    normalize_data: bool = True
+    normalization_mode: str = 'Maximum'  # Maximum, Logarithmic, Natural log, Square root
+    
+    # Smoothing
+    apply_smoothing: bool = False
+    smoothing_type: str = 'gaussian'  # gaussian, savgol
     gaussian_sigma: float = 2.0
+    savgol_window: int = 11
+    savgol_polyorder: int = 3
+    
+    # Noise reduction
     noise_threshold: float = 0.0
     apply_intensity_threshold: bool = False
     intensity_min_threshold: float = 0.0
     intensity_max_threshold: float = 1.0
-    custom_cmap: Optional[Any] = None
-    color_map: Optional[str] = None
-    font_size: int = 12
-    figure_size: int = 10
-    dpi: int = 300
-    show_colorbar: bool = True
-    colorbar_shrink: float = 0.8
-    colorbar_aspect: int = 20
-    x_values: List[float] = field(default_factory=list)
-    x_labels: List[str] = field(default_factory=list)
-    y_values: List[float] = field(default_factory=list)
-    y_labels: List[str] = field(default_factory=list)
-    reference_line_color: str = 'black'
-    stacked_offset_mode: str = 'auto'
-    stacked_offset_value: float = 1.0
-    stacked_line_width: float = 1.5
-    stacked_fill_alpha: float = 0.3
-    stacked_show_labels: bool = True
-    stacked_label_frequency: int = 1
-    stacked_line_color_mode: str = 'gradient'
-    stacked_single_color: str = '#1f77b4'
-    show_grid: bool = False
-
-# Context managers for better resource management
-@contextmanager
-def streamlit_spinner(message: str):
-    """Context manager for Streamlit spinners with error handling"""
-    with st.spinner(message):
-        try:
-            yield
-        except Exception as e:
-            st.error(f"❌ {message} failed: {str(e)}")
-            raise
-
-@contextmanager
-def matplotlib_figure(figsize: Tuple[int, int], dpi: int):
-    """Context manager for matplotlib figures to ensure cleanup"""
-    fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
-    fig.patch.set_facecolor('white')
-    try:
-        yield fig, ax
-    finally:
-        plt.close(fig)
-
-class CIUDataProcessor:
-    """Handles CIU data processing and calibration"""
     
-    def __init__(self, config: AppConfig = None):
-        self.config = config or AppConfig()
+    # Plot appearance
+    colormap: str = 'viridis'
+    show_colorbar: bool = True
+    colorbar_position: str = 'right'
+    colorbar_width: float = 5.0
+    colorbar_pad: float = 0.05
+    
+    # Labels and fonts
+    font_size: int = 12
+    label_weight: bool = False
+    tick_size: int = 10
+    
+    # Figure
+    figure_size: float = 8.0
+    dpi: int = 300
+
+class ORIGAMIDataProcessor:
+    """Exact replication of ORIGAMI's data processing methods"""
     
     @staticmethod
     def load_twim_extract(file) -> pd.DataFrame:
-        """Load TWIM extract file with automatic header detection"""
+        """Load TWIMExtract file with ORIGAMI-style parsing"""
         try:
-            first_row = file.readline().decode("utf-8")
             file.seek(0)
+            content = file.read().decode('utf-8').strip()
+            lines = content.split('\n')
             
-            if first_row.startswith("#"):
-                df = pd.read_csv(file, header=2)
-            else:
-                df = pd.read_csv(file)
+            # Find collision voltage line
+            cv_line_idx = None
+            for i, line in enumerate(lines):
+                if line.startswith('$TrapCV:'):
+                    cv_line_idx = i
+                    break
             
-            df.iloc[:, 0] = pd.to_numeric(df.iloc[:, 0], errors='coerce')
-            df = df.dropna(subset=[df.columns[0]])
-            df.columns = ['Drift Time'] + list(df.columns[1:])
+            if cv_line_idx is None:
+                raise ValueError("Could not find $TrapCV: line in TWIMExtract file")
             
-            # Ensure no negative intensities
-            df.iloc[:, 1:] = df.iloc[:, 1:].clip(lower=0)
+            # Extract collision voltages
+            cv_line = lines[cv_line_idx]
+            cv_values = [float(x.strip()) for x in cv_line.split(',')[1:] if x.strip()]
+            
+            # Parse data starting after CV line
+            data_lines = lines[cv_line_idx + 1:]
+            data_rows = []
+            
+            for line in data_lines:
+                if line.strip():
+                    parts = line.split(',')
+                    if len(parts) >= len(cv_values) + 1:
+                        try:
+                            drift_time = float(parts[0])
+                            intensities = []
+                            for i in range(1, len(cv_values) + 1):
+                                try:
+                                    intensity = float(parts[i]) if parts[i].strip() else 0.0
+                                    intensities.append(intensity)
+                                except (ValueError, IndexError):
+                                    intensities.append(0.0)
+                            data_rows.append([drift_time] + intensities)
+                        except (ValueError, IndexError):
+                            continue
+            
+            if not data_rows:
+                raise ValueError("No valid data found in TWIMExtract file")
+            
+            # Create DataFrame
+            columns = ['Drift Time (ms)'] + [f'CV_{cv:.0f}V' for cv in cv_values]
+            df = pd.DataFrame(data_rows, columns=columns)
+            
+            # Clean data
+            df = df.dropna(subset=['Drift Time (ms)'])
+            df = df[df['Drift Time (ms)'] > 0]
+            
+            # Store CV values as metadata
+            df.cv_values = cv_values
+            
+            st.success(f"✅ Loaded TWIMExtract: {len(df)} drift time points, {len(cv_values)} CV values")
+            st.info(f"📏 Drift time range: {df['Drift Time (ms)'].min():.2f} - {df['Drift Time (ms)'].max():.2f} ms")
+            st.info(f"⚡ CV range: {min(cv_values):.0f} - {max(cv_values):.0f} V")
             
             return df
             
         except Exception as e:
-            raise ValueError(f"Error loading TWIM extract file: {str(e)}")
+            raise ValueError(f"Error loading TWIMExtract file: {str(e)}")
+    
+    @staticmethod
+    def validate_and_clean_calibration(cal_data: pd.DataFrame) -> pd.DataFrame:
+        """Validate calibration data for physical consistency"""
+        original_count = len(cal_data)
+        
+        # Sort by drift time
+        cal_data = cal_data.sort_values("Drift").reset_index(drop=True)
+        
+        # Find minimum drift time and corresponding CCS
+        min_drift_idx = cal_data["Drift"].idxmin()
+        min_drift_ccs = cal_data.loc[min_drift_idx, "CCS"]
+        
+        # Check if any points have larger CCS with smaller drift times
+        # This is physically inconsistent - smaller drift times should give smaller CCS
+        problematic_mask = (cal_data["Drift"] <= cal_data.loc[min_drift_idx, "Drift"]) & (cal_data["CCS"] > min_drift_ccs)
+        
+        if problematic_mask.any():
+            problematic_count = problematic_mask.sum()
+            st.warning(f"🔍 Found {problematic_count} physically inconsistent calibration points")
+            
+            # Show details of problematic points
+            problematic_points = cal_data[problematic_mask]
+            st.info("❌ Removing points with CCS > min_CCS but Drift ≤ min_Drift:")
+            for _, row in problematic_points.iterrows():
+                st.info(f"   • Drift: {row['Drift']:.3f} ms, CCS: {row['CCS']:.1f} Å² (vs min: {min_drift_ccs:.1f} Å²)")
+            
+            # Remove problematic points
+            cal_data = cal_data[~problematic_mask].reset_index(drop=True)
+        
+        # Additional check: ensure monotonic relationship (optional strict check)
+        # Remove any points where CCS decreases with increasing drift time
+        drift_sorted = cal_data.sort_values("Drift")
+        ccs_values = drift_sorted["CCS"].values
+        
+        # Find where CCS decreases (non-monotonic behavior)
+        non_monotonic_mask = np.diff(ccs_values) < 0
+        
+        if non_monotonic_mask.any():
+            non_monotonic_count = non_monotonic_mask.sum()
+            st.warning(f"🔍 Found {non_monotonic_count} non-monotonic transitions in calibration")
+            
+            # Keep only points that maintain monotonic increase
+            keep_indices = [0]  # Always keep first point
+            for i in range(1, len(drift_sorted)):
+                if drift_sorted.iloc[i]["CCS"] >= drift_sorted.iloc[keep_indices[-1]]["CCS"]:
+                    keep_indices.append(i)
+            
+            cal_data = drift_sorted.iloc[keep_indices].reset_index(drop=True)
+            removed_non_monotonic = len(drift_sorted) - len(keep_indices)
+            if removed_non_monotonic > 0:
+                st.info(f"🧹 Removed {removed_non_monotonic} points to ensure monotonic CCS vs Drift relationship")
+        
+        # Final validation
+        if len(cal_data) < 3:
+            raise ValueError("Insufficient calibration points remaining after validation (need at least 3)")
+        
+        # Check final relationship
+        correlation = cal_data["Drift"].corr(cal_data["CCS"])
+        if correlation < 0.8:
+            st.warning(f"⚠️ Low correlation between Drift and CCS (r={correlation:.3f}). Check calibration data quality.")
+        
+        removed_count = original_count - len(cal_data)
+        if removed_count > 0:
+            st.success(f"✅ Calibration validation complete: removed {removed_count}/{original_count} inconsistent points")
+            st.info(f"📊 Final calibration: {len(cal_data)} points, correlation r={correlation:.3f}")
+        else:
+            st.success(f"✅ Calibration validation complete: all {original_count} points are physically consistent")
+        
+        return cal_data
     
     @staticmethod
     def load_calibration_data(file, charge_state: int) -> pd.DataFrame:
-        """Load calibration data - convert drift times from seconds to milliseconds"""
+        """Load calibration data with ORIGAMI-style filtering and validation"""
         try:
+            file.seek(0)
             cal_df = pd.read_csv(file)
+            
+            # Check required columns
+            required_cols = ["Z", "Drift", "CCS"]
+            missing_cols = [col for col in required_cols if col not in cal_df.columns]
+            if missing_cols:
+                raise ValueError(f"Missing required columns: {missing_cols}")
+            
+            # Filter by charge state
             cal_data = cal_df[cal_df["Z"] == charge_state].copy()
             
             if cal_data.empty:
-                raise ValueError(f"No calibration data found for charge state {charge_state}")
+                available_z = sorted(cal_df["Z"].unique())
+                raise ValueError(f"No data for Z={charge_state}. Available: {available_z}")
             
-            required_cols = ["Drift", "CCS"]
-            missing_cols = [col for col in required_cols if col not in cal_data.columns]
-            if missing_cols:
-                raise ValueError(f"Calibration data missing required columns: {missing_cols}")
+            # Convert drift times to milliseconds if needed
+            if cal_data["Drift"].max() < 1:  # Assuming seconds if max < 1
+                cal_data["Drift"] = cal_data["Drift"] * 1000
+                st.info("🔄 Converted drift times from seconds to milliseconds")
             
-            # Convert calibration drift times from seconds to milliseconds
-            cal_data["Drift (ms)"] = cal_data["Drift"] * 1000
+            st.info(f"📥 Raw calibration: {len(cal_data)} points for Z={charge_state}")
+            st.info(f"📏 Raw drift range: {cal_data['Drift'].min():.2f} - {cal_data['Drift'].max():.2f} ms")
+            st.info(f"🎯 Raw CCS range: {cal_data['CCS'].min():.1f} - {cal_data['CCS'].max():.1f} Å²")
+            
+            # Validate and clean calibration data
+            cal_data = ORIGAMIDataProcessor.validate_and_clean_calibration(cal_data)
+            
+            # Sort final data
+            cal_data = cal_data.sort_values("Drift").reset_index(drop=True)
+            
+            st.success(f"✅ Final calibration: {len(cal_data)} validated points")
+            st.info(f"📏 Final drift range: {cal_data['Drift'].min():.2f} - {cal_data['Drift'].max():.2f} ms")
+            st.info(f"🎯 Final CCS range: {cal_data['CCS'].min():.1f} - {cal_data['CCS'].max():.1f} Å²")
+            
             return cal_data
             
         except Exception as e:
             raise ValueError(f"Error loading calibration data: {str(e)}")
     
     @staticmethod
-    def apply_drift_correction(df: pd.DataFrame, settings: ProcessingSettings) -> pd.DataFrame:
-        """Apply instrument-specific drift time corrections - ONLY subtract inject_time here"""
-        df_corrected = df.copy()
-        
-        # Only subtract inject_time for Cyclic data, and only once
-        if settings.data_type == InstrumentType.CYCLIC and settings.inject_time is not None:
-            df_corrected["Drift Time"] = df_corrected["Drift Time"] - settings.inject_time
-        
-        return df_corrected
-    
-    def calibrate_data(self, twim_df: pd.DataFrame, cal_data: pd.DataFrame, inject_time: float = 0.0) -> np.ndarray:
-        """Calibrate TWIM data - use already-corrected drift times, interpolate CCS"""
+    def calibrate_twim_data(twim_df: pd.DataFrame, cal_data: pd.DataFrame, 
+                           inject_time: float = 0.0) -> np.ndarray:
+        """Calibrate TWIM data using ORIGAMI-style interpolation"""
         calibrated_data = []
-
-        drift_times = twim_df["Drift Time"].values
-        collision_voltages = twim_df.columns[1:]
-
-        # Sort calibration data by drift time for interpolation
-        cal_data_sorted = cal_data.sort_values("Drift (ms)")
-        cal_drift_times = cal_data_sorted["Drift (ms)"].values
-        cal_ccs_values = cal_data_sorted["CCS"].values
-
-        for idx, drift_time in enumerate(drift_times):
-            if pd.isna(drift_time):
+        
+        drift_times = twim_df['Drift Time (ms)'].values
+        cv_values = twim_df.cv_values
+        
+        # Apply injection time correction for cyclic data
+        corrected_drift_times = drift_times - inject_time
+        
+        # Filter valid drift times
+        valid_mask = corrected_drift_times > 0
+        corrected_drift_times = corrected_drift_times[valid_mask]
+        
+        # Check calibration range
+        cal_min, cal_max = cal_data['Drift'].min(), cal_data['Drift'].max()
+        
+        st.info(f"🔧 Processing {len(corrected_drift_times)} valid drift time points")
+        st.info(f"📏 Calibration range: {cal_min:.2f} - {cal_max:.2f} ms")
+        
+        # Count points outside calibration range
+        outside_range = ((corrected_drift_times < cal_min) | (corrected_drift_times > cal_max)).sum()
+        if outside_range > 0:
+            st.warning(f"⚠️ {outside_range} drift time points outside calibration range will be skipped")
+        
+        valid_points = 0
+        for i, dt in enumerate(drift_times):
+            if not valid_mask[i]:
                 continue
-
-            # Use drift_time as-is (already corrected in apply_drift_correction)
-            # DO NOT subtract inject_time again!
-            corrected_drift_time = drift_time
-
-            intensities = twim_df.iloc[idx, 1:].values
-
-            # Interpolate CCS value using calibration curve
-            if corrected_drift_time <= cal_drift_times.min():
-                ccs_value = cal_ccs_values[0]
-            elif corrected_drift_time >= cal_drift_times.max():
-                ccs_value = cal_ccs_values[-1]
-            else:
-                ccs_value = np.interp(corrected_drift_time, cal_drift_times, cal_ccs_values)
-
-            # Ensure CCS is never negative
-            ccs_value = max(ccs_value, 0)
-
-            for col_idx, intensity in enumerate(intensities):
-                if not pd.isna(intensity) and intensity > 0:
-                    cv = collision_voltages[col_idx]
-                    try:
-                        cv_float = float(cv)
-                        calibrated_data.append([ccs_value, corrected_drift_time, cv_float, intensity])
-                    except (ValueError, TypeError):
-                        continue
-
+                
+            corrected_dt = corrected_drift_times[valid_points]
+            
+            # Skip if outside calibration range
+            if corrected_dt < cal_min or corrected_dt > cal_max:
+                valid_points += 1
+                continue
+            
+            # Interpolate CCS value using validated calibration
+            ccs_value = np.interp(corrected_dt, cal_data['Drift'].values, cal_data['CCS'].values)
+            
+            # Get intensities for this drift time
+            intensities = twim_df.iloc[i, 1:].values
+            
+            # Add data point for each CV
+            for j, (cv, intensity) in enumerate(zip(cv_values, intensities)):
+                if not pd.isna(intensity) and intensity > 0:  # Only include positive intensities
+                    calibrated_data.append([ccs_value, corrected_dt, cv, intensity])
+            
+            valid_points += 1
+        
         if not calibrated_data:
             raise ValueError("No valid calibrated data points generated")
-
-        return np.array(calibrated_data)
-
-class CIUVisualization:
-    """Handles CIU heatmap visualization"""
-    
-    def __init__(self, config: AppConfig = None):
-        self.config = config or AppConfig()
-    
-    @staticmethod
-    def create_colorblind_cmap(color_name: str):
-        """Create a colormap from white to seaborn colorblind color"""
-        colors = sns.color_palette("colorblind")
-        color_dict = {
-            'pink': colors[6], 'blue': colors[0], 'orange': colors[1], 'green': colors[2],
-            'red': colors[3], 'purple': colors[4], 'brown': colors[5], 'gray': colors[7],
-            'olive': colors[8], 'cyan': colors[9]
-        }
-        selected_color = color_dict.get(color_name, colors[6])
-        return mcolors.LinearSegmentedColormap.from_list(
-            f'white_to_{color_name}', ['white', selected_color], N=256
-        )
-    
-    @staticmethod
-    def filter_data_by_range(data: np.ndarray, settings: HeatmapSettings) -> np.ndarray:
-        """Filter data to specified axis ranges using boolean indexing"""
-        mask = ((data[:, 2] >= settings.x_min) & (data[:, 2] <= settings.x_max) & 
-               (data[:, 0] >= settings.y_min) & (data[:, 0] <= settings.y_max))
         
-        if not np.any(mask):
-            raise ValueError("No data points in the specified range")
+        result = np.array(calibrated_data)
+        st.success(f"✅ Calibrated {len(result):,} data points")
+        st.info(f"🎯 CCS range: {result[:, 0].min():.1f} - {result[:, 0].max():.1f} Å²")
+        st.info(f"⚡ CV range: {result[:, 2].min():.1f} - {result[:, 2].max():.1f} V")
+        st.info(f"💡 Intensity range: {result[:, 3].min():.0f} - {result[:, 3].max():.0f}")
         
-        return data[mask]
+        return result
+
+class ORIGAMIVisualizer:
+    """ORIGAMI-style visualization methods"""
     
     @staticmethod
-    def normalize_2D_origami(inputData: np.ndarray, mode: str = 'Maximum') -> np.ndarray:
-        """EXACT copy of ORIGAMI's normalize_2D function"""
-        inputData = np.nan_to_num(inputData)
-        inputData[inputData < 0] = 0  # Clip negatives
+    def normalize_2D(input_data: np.ndarray, mode: str = 'Maximum') -> np.ndarray:
+        """Exact replication of ORIGAMI's normalize_2D function"""
+        input_data = np.nan_to_num(input_data)
+        input_data[input_data < 0] = 0
         
         if mode == "Maximum":
-            normData = normalize(inputData.astype(np.float64), axis=0, norm='max')
+            # Column-wise normalization (each CV column to its maximum)
+            norm_data = input_data.copy().astype(np.float64)
+            for col in range(norm_data.shape[1]):
+                col_max = np.max(norm_data[:, col])
+                if col_max > 0:
+                    norm_data[:, col] = norm_data[:, col] / col_max
+                    
         elif mode == 'Logarithmic':
-            normData = np.log10(np.clip(inputData.astype(np.float64), a_min=1e-10, a_max=None))
-        elif mode == 'Natural log':
-            normData = np.log(np.clip(inputData.astype(np.float64), a_min=1e-10, a_max=None))
-        elif mode == 'Square root':
-            normData = np.sqrt(np.clip(inputData.astype(np.float64), a_min=0, a_max=None))
-        elif mode == 'Least Abs Deviation':
-            normData = normalize(inputData.astype(np.float64), axis=0, norm='l1')
-        elif mode == 'Least Squares':
-            normData = normalize(inputData.astype(np.float64), axis=0, norm='l2')
-        
-        normData[normData < 0] = 0  # Clip negatives after normalization
-        return normData
-    
-    def create_interpolation_grid_origami(self, data: np.ndarray, settings: HeatmapSettings) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Create interpolated intensity grid using regular grid in both CV and CCS directions (ORIGAMI style)"""
-        filtered_data = self.filter_data_by_range(data, settings)
-        
-        # Use separate X and Y grid resolutions if provided, otherwise use default
-        x_points = settings.x_grid_resolution or settings.grid_resolution
-        y_points = settings.y_grid_resolution or settings.grid_resolution
-        
-        # Create regular grids for both CV (X) and CCS (Y)
-        cv_grid = np.linspace(settings.x_min, settings.x_max, x_points)
-        ccs_grid = np.linspace(settings.y_min, settings.y_max, y_points)
-        X, Y = np.meshgrid(cv_grid, ccs_grid)
-
-        # Interpolate intensity onto the regular grid
-        Z = griddata(
-            (filtered_data[:, 2], filtered_data[:, 0]),  # (CV, CCS)
-            filtered_data[:, 3],  # Intensity
-            (X, Y),
-            method=settings.interpolation_method,
-            fill_value=0
-        )
-        
-        Z = np.nan_to_num(Z, nan=0.0)
-        Z[Z < 0] = 0  # Clip negatives after interpolation
-        
-        # Apply ORIGAMI normalization only if requested
-        if settings.normalize_data:
-            Z = self.normalize_2D_origami(Z, mode='Maximum')
-        
-        return X, Y, Z, filtered_data
-
-    def create_interpolation_grid_origami_stacked(self, data: np.ndarray, settings: HeatmapSettings) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Create interpolated intensity grid for stacked plots - ALWAYS NORMALIZED"""
-        filtered_data = self.filter_data_by_range(data, settings)
-        
-        grid_x = np.linspace(settings.x_min, settings.x_max, num=settings.grid_resolution)
-        grid_y = np.linspace(settings.y_min, settings.y_max, num=settings.grid_resolution)
-        X, Y = np.meshgrid(grid_x, grid_y)
-        
-        Z = griddata(
-            (filtered_data[:, 2], filtered_data[:, 0]),
-            filtered_data[:, 3],
-            (X, Y),
-            method=settings.interpolation_method,
-            fill_value=0
-        )
-        
-        Z = np.nan_to_num(Z, nan=0.0)
-        
-        # ALWAYS apply ORIGAMI normalization for stacked plots
-        Z = self.normalize_2D_origami(Z, mode='Maximum')
-        
-        return X, Y, Z, filtered_data
-
-    def _add_colorbar(self, fig, ax, c, settings: HeatmapSettings) -> None:
-        """Add colorbar to the plot with proper units"""
-        if not settings.show_colorbar:
-            return
+            norm_data = np.log10(np.clip(input_data.astype(np.float64), a_min=1e-10, a_max=None))
             
-        cbar = plt.colorbar(c, ax=ax, shrink=settings.colorbar_shrink, 
-                          aspect=settings.colorbar_aspect)
-        intensity_label = "Normalized Intensity" if settings.normalize_data else "Intensity"
-        cbar.set_label(intensity_label, fontsize=settings.font_size, 
-                      fontweight='normal', color='black')
-        cbar.ax.tick_params(labelsize=settings.font_size * 0.9, colors='black')
-
-    def _setup_plot_appearance(self, ax, settings: HeatmapSettings) -> None:
-        """Configure plot styling and appearance with proper units"""
-        ax.set_xlabel("Collision Voltage (V)", fontsize=settings.font_size, 
-                     fontweight='normal', color='black')
-        ax.set_ylabel("CCS (Å²)", fontsize=settings.font_size, 
-                     fontweight='normal', color='black')
-        ax.tick_params(labelsize=settings.font_size * 0.9, colors='black', width=1.2)
+        elif mode == 'Natural log':
+            norm_data = np.log(np.clip(input_data.astype(np.float64), a_min=1e-10, a_max=None))
+            
+        elif mode == 'Square root':
+            norm_data = np.sqrt(np.clip(input_data.astype(np.float64), a_min=0, a_max=None))
         
-        for spine in ax.spines.values():
-            spine.set_color('black')
-            spine.set_linewidth(1.5)
+        else:
+            norm_data = input_data.copy()
         
-        ax.set_facecolor('white')
+        norm_data[norm_data < 0] = 0
+        return norm_data
     
-    def _add_reference_lines(self, ax, settings: HeatmapSettings):
-        """Add reference lines with labels positioned to the right"""
-        for x_val, x_label in zip(settings.x_values, settings.x_labels):
-            ax.axvline(x=x_val, color=settings.reference_line_color, linestyle='--', linewidth=1, alpha=0.8)
-            ax.text(x_val + (settings.x_max - settings.x_min) * 0.01, settings.y_max * 0.95, x_label, 
-                   color=settings.reference_line_color, va='top', ha='left', fontsize=settings.font_size)
-        
-        for y_val, y_label in zip(settings.y_values, settings.y_labels):
-            ax.axhline(y=y_val, color=settings.reference_line_color, linestyle='--', linewidth=1, alpha=0.8)
-            ax.text(settings.x_max * 0.98, y_val, y_label, 
-                   color=settings.reference_line_color, va='center', ha='right', fontsize=settings.font_size)
-
     @staticmethod
-    def adjust_min_max_intensity(inputData: np.ndarray, min_threshold: float = 0.0, max_threshold: float = 1.0) -> np.ndarray:
-        """EXACT copy of ORIGAMI's adjust_min_max_intensity function"""
+    def smooth_gaussian_2D(input_data: np.ndarray, sigma: float = 2.0) -> np.ndarray:
+        """ORIGAMI's Gaussian smoothing"""
+        if input_data is None or len(input_data) == 0:
+            return input_data
+        
+        if sigma < 0:
+            sigma = 1
+            st.warning("Sigma too low, reset to 1")
+        
+        data_out = gaussian_filter(input_data, sigma=sigma, order=0)
+        data_out[data_out < 0] = 0
+        return data_out
+    
+    @staticmethod
+    def smooth_savgol_2D(input_data: np.ndarray, poly_order: int = 2, window_size: int = 5) -> np.ndarray:
+        """ORIGAMI's Savitzky-Golay smoothing"""
+        if input_data is None or len(input_data) == 0:
+            return input_data
+        
+        if poly_order <= 0:
+            poly_order = 2
+            st.warning("Polynomial order too small, reset to 2")
+        
+        if window_size <= poly_order:
+            window_size = poly_order + 1
+            st.warning(f"Window size too small, reset to {window_size}")
+        
+        if window_size % 2 == 0:
+            window_size += 1
+            st.info("Window size was even, made odd")
+        
+        data_out = savgol_filter(input_data, polyorder=poly_order, window_length=window_size, axis=0)
+        data_out[data_out < 0] = 0
+        return data_out
+    
+    @staticmethod
+    def remove_noise_2D(input_data: np.ndarray, threshold: float = 0) -> np.ndarray:
+        """ORIGAMI's noise removal"""
+        if threshold > np.max(input_data) or threshold < 0:
+            st.warning(f"Threshold too high (max={np.max(input_data):.0f}), reset to 0")
+            threshold = 0
+        
+        input_data[input_data <= threshold] = 0
+        return input_data
+    
+    @staticmethod
+    def adjust_min_max_intensity(input_data: np.ndarray, min_threshold: float = 0.0, 
+                                max_threshold: float = 1.0) -> np.ndarray:
+        """ORIGAMI's intensity thresholding"""
         if min_threshold > max_threshold:
-            st.warning("Minimum threshold is larger than the maximum. Values were reversed.")
+            st.warning("Min > Max threshold, swapping values")
             min_threshold, max_threshold = max_threshold, min_threshold
         
         if min_threshold == max_threshold:
-            st.warning("Minimum and maximum thresholds are the same.")
-            return inputData
+            st.warning("Min and Max thresholds are equal")
+            return input_data
         
-        data_max = np.max(inputData)
-        min_threshold = min_threshold * data_max
-        max_threshold = max_threshold * data_max
+        data_max = np.max(input_data)
+        min_thresh = min_threshold * data_max
+        max_thresh = max_threshold * data_max
         
-        inputData[inputData <= min_threshold] = 0
-        inputData[inputData >= max_threshold] = data_max
+        input_data[input_data <= min_thresh] = 0
+        input_data[input_data >= max_thresh] = data_max
         
-        return inputData
+        return input_data
     
     @staticmethod
-    def remove_noise_2D(inputData: np.ndarray, threshold: float = 0) -> np.ndarray:
-        """EXACT copy of ORIGAMI's remove_noise_2D function"""
-        if (threshold > np.max(inputData)) or (threshold < 0):
-            st.warning(f"Threshold value was too high - the maximum value is {np.max(inputData)}. Value was reset to 0.")
-            threshold = 0
-        elif threshold == 0.0:
-            pass
-        elif (threshold < (np.max(inputData)/10000)):
-            if (threshold > 1) or (threshold <= 0):
-                threshold = 0
-            st.warning(f"Threshold value was too low - the maximum value is {np.max(inputData)}. Value was reset to 0.")
-            threshold = 0
-        else:
-            threshold = threshold
-              
-        inputData[inputData <= threshold] = 0
-        return inputData
+    def create_2D_grid(data: np.ndarray, cv_range: Tuple[float, float], 
+                      ccs_range: Tuple[float, float], resolution: int = 200) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Create interpolated 2D grid using ORIGAMI method"""
+        # Extract data columns: CCS, Drift, CV, Intensity
+        cv_vals = data[:, 2]
+        ccs_vals = data[:, 0]
+        intensity_vals = data[:, 3]
+        
+        # Create regular grid
+        cv_grid = np.linspace(cv_range[0], cv_range[1], resolution)
+        ccs_grid = np.linspace(ccs_range[0], ccs_range[1], resolution)
+        CV_grid, CCS_grid = np.meshgrid(cv_grid, ccs_grid)
+        
+        # Interpolate intensity onto grid
+        try:
+            Z = griddata(
+                (cv_vals, ccs_vals), 
+                intensity_vals, 
+                (CV_grid, CCS_grid), 
+                method='cubic', 
+                fill_value=0
+            )
+        except:
+            st.warning("Cubic interpolation failed, using linear")
+            Z = griddata(
+                (cv_vals, ccs_vals), 
+                intensity_vals, 
+                (CV_grid, CCS_grid), 
+                method='linear', 
+                fill_value=0
+            )
+        
+        Z = np.nan_to_num(Z, nan=0.0)
+        Z[Z < 0] = 0
+        
+        return CV_grid, CCS_grid, Z
     
-    @staticmethod
-    def smooth_gaussian_2D(inputData: np.ndarray, sigma: float = 2) -> np.ndarray:
-        """EXACT copy of ORIGAMI's smooth_gaussian_2D function"""
-        if inputData is None or len(inputData) == 0:
-            return None
-        if sigma < 0:
-            st.warning("Value of sigma is too low. Value was reset to 1")
-            sigma = 1
+    def create_ciu_heatmap(self, data: np.ndarray, settings: ORIGAMISettings) -> plt.Figure:
+        """Create CIU heatmap using ORIGAMI methods"""
+        # Determine data ranges
+        cv_range = (data[:, 2].min(), data[:, 2].max())
+        ccs_range = (data[:, 0].min(), data[:, 0].max())
         
-        dataOut = gaussian_filter(inputData, sigma=sigma, order=0)
-        dataOut[dataOut < 0] = 0
-        return dataOut
-    
-    @staticmethod
-    def smooth_savgol_2D(inputData: np.ndarray, polyOrder: int = 2, windowSize: int = 5) -> np.ndarray:
-        """EXACT copy of ORIGAMI's smooth_savgol_2D function"""
-        if inputData is None or len(inputData) == 0:
-            return None
+        st.info(f"📊 Creating CIU heatmap:")
+        st.info(f"   • CV range: {cv_range[0]:.1f} - {cv_range[1]:.1f} V")
+        st.info(f"   • CCS range: {ccs_range[0]:.1f} - {ccs_range[1]:.1f} Å²")
+        st.info(f"   • Data points: {len(data):,}")
         
-        if (polyOrder <= 0):
-            st.warning("Polynomial order is too small. Value was reset to 2")
-            polyOrder = 2   
+        # Create interpolated grid
+        X, Y, Z = self.create_2D_grid(data, cv_range, ccs_range, settings.grid_resolution)
         
-        if windowSize is None:
-            windowSize = polyOrder + 1
-        elif (windowSize % 2) and (windowSize > polyOrder):
-            windowSize = windowSize
-        elif windowSize <= polyOrder:
-            st.warning(f"Window size was smaller than the polynomial order. Value was reset to {polyOrder + 1}")
-            windowSize = polyOrder + 1
-        else:
-            st.info('Window size is even. Adding 1 to make it odd.')
-            windowSize = windowSize + 1
-              
-        dataOut = savgol_filter(inputData, polyorder=polyOrder, window_length=windowSize, axis=0)
-        dataOut[dataOut < 0] = 0
-        return dataOut
-    
-    def apply_smoothing_origami(self, Z: np.ndarray, settings: HeatmapSettings) -> np.ndarray:
-        """Apply ORIGAMI-style smoothing options - NO ADDITIONAL PREPROCESSING"""
-        if not settings.apply_smoothing:
-            return Z
+        # Apply ORIGAMI processing
+        if settings.normalize_data:
+            Z = self.normalize_2D(Z, mode=settings.normalization_mode)
+            st.info(f"✅ Applied {settings.normalization_mode} normalization")
         
-        if settings.smoothing_type == 'gaussian':
-            Z_smooth = self.smooth_gaussian_2D(Z, sigma=settings.gaussian_sigma)
-        else:  # savgol
-            Z_smooth = self.smooth_savgol_2D(Z, polyOrder=settings.poly_order, windowSize=settings.window_length)
+        if settings.apply_smoothing:
+            if settings.smoothing_type == 'gaussian':
+                Z = self.smooth_gaussian_2D(Z, sigma=settings.gaussian_sigma)
+                st.info(f"✅ Applied Gaussian smoothing (σ={settings.gaussian_sigma})")
+            else:
+                Z = self.smooth_savgol_2D(Z, poly_order=settings.savgol_polyorder, 
+                                        window_size=settings.savgol_window)
+                st.info(f"✅ Applied Savitzky-Golay smoothing")
         
         if settings.noise_threshold > 0:
-            Z_smooth = self.remove_noise_2D(Z_smooth, threshold=settings.noise_threshold)
+            Z = self.remove_noise_2D(Z, threshold=settings.noise_threshold)
+            st.info(f"✅ Removed noise below {settings.noise_threshold}")
         
         if settings.apply_intensity_threshold:
-            Z_smooth = self.adjust_min_max_intensity(Z_smooth, 
-                                                   min_threshold=settings.intensity_min_threshold, 
-                                                   max_threshold=settings.intensity_max_threshold)
+            Z = self.adjust_min_max_intensity(Z, settings.intensity_min_threshold, 
+                                            settings.intensity_max_threshold)
+            st.info("✅ Applied intensity thresholding")
         
-        return Z_smooth
-    
-    def create_stacked_ccsd_plot_origami(self, data: np.ndarray, settings: HeatmapSettings) -> Tuple[plt.Figure, np.ndarray]:
-        """Create stacked CCSD plot - FIXED Y-axis sizing and trace height"""
-        X, Y, Z, filtered_data = self.create_interpolation_grid_origami_stacked(data, settings)
-        Z = self.apply_smoothing_origami(Z, settings)
-        
-        # Get actual CV values from data (ORIGAMI approach)
-        actual_cv_values = np.unique(filtered_data[:, 2])
-        actual_cv_values = actual_cv_values[(actual_cv_values >= settings.x_min) & 
-                                          (actual_cv_values <= settings.x_max)]
-        actual_cv_values = np.sort(actual_cv_values)
-        
-        ccs_values = np.linspace(settings.y_min, settings.y_max, num=settings.grid_resolution)
-        
-        # FIXED: Better aspect ratio for stacked plots
-        fig, ax = plt.subplots(figsize=(settings.figure_size, settings.figure_size * 1.2), dpi=settings.dpi)
+        # Create figure
+        fig, ax = plt.subplots(figsize=(settings.figure_size, settings.figure_size), 
+                              dpi=settings.dpi)
         fig.patch.set_facecolor('white')
         
-        # Select CVs to plot based on frequency
-        cv_step = settings.stacked_label_frequency
-        cv_indices_to_plot = range(0, len(actual_cv_values), cv_step)
-        selected_cvs = [actual_cv_values[i] for i in cv_indices_to_plot]
-        n_traces = len(selected_cvs)
+        # Plot heatmap
+        im = ax.pcolormesh(X, Y, Z, cmap=settings.colormap, shading='auto')
         
-        if n_traces == 0:
-            raise ValueError("No traces to plot in the selected range")
+        # Set labels and formatting
+        ax.set_xlabel('Collision Voltage (V)', fontsize=settings.font_size, 
+                     fontweight='bold' if settings.label_weight else 'normal')
+        ax.set_ylabel('CCS (Å²)', fontsize=settings.font_size, 
+                     fontweight='bold' if settings.label_weight else 'normal')
         
-        # FIXED: Better calculation of trace dimensions
-        ccs_range = settings.y_max - settings.y_min
+        ax.tick_params(labelsize=settings.tick_size)
         
-        # Calculate vertical spacing first
-        if settings.stacked_offset_mode == 'auto':
-            # Auto mode: distribute traces evenly with some padding
-            total_plot_height = ccs_range * 3  # Give more vertical space
-            vertical_spacing = total_plot_height / max(1, n_traces + 1)  # +1 for padding
-        elif settings.stacked_offset_mode == 'percentage':
-            # Base trace height as percentage of CCS range
-            base_trace_height = ccs_range * 0.15  # 15% of CCS range
-            vertical_spacing = base_trace_height * (settings.stacked_offset_value / 100)
-        else:  # manual
-            # Base trace height as percentage of CCS range
-            base_trace_height = ccs_range * 0.15  # 15% of CCS range
-            vertical_spacing = base_trace_height * settings.stacked_offset_value
+        # Add colorbar
+        if settings.show_colorbar:
+            cbar = plt.colorbar(im, ax=ax, shrink=0.8, aspect=20, pad=settings.colorbar_pad)
+            intensity_label = "Normalized Intensity" if settings.normalize_data else "Intensity"
+            cbar.set_label(intensity_label, fontsize=settings.font_size)
+            cbar.ax.tick_params(labelsize=settings.tick_size)
         
-        # FIXED: Trace height should be substantial and independent of spacing
-        if settings.stacked_offset_mode == 'auto':
-            # In auto mode, make trace height proportional to spacing
-            max_trace_height = vertical_spacing * 0.8  # 80% of spacing
-        else:
-            # In manual/percentage mode, use a good default height
-            max_trace_height = ccs_range * 0.12  # 12% of CCS range
-
-        # Generate colors
-        if settings.stacked_line_color_mode == 'single':
-            colors = [settings.stacked_single_color] * n_traces
-        elif settings.stacked_line_color_mode == 'gradient':
-            if settings.custom_cmap is not None:
-                colors = [settings.custom_cmap(i / max(1, n_traces-1)) for i in range(n_traces)]
-            else:
-                cmap = plt.cm.get_cmap(settings.color_map or 'viridis')
-                colors = [cmap(i / max(1, n_traces-1)) for i in range(n_traces)]
-        else:  # colorblind_cycle
-            cb_colors = sns.color_palette("colorblind", n_colors=min(n_traces, 10))
-            colors = [cb_colors[i % len(cb_colors)] for i in range(n_traces)]
+        plt.tight_layout()
         
-        y_tick_positions = []
-        y_tick_labels = []
+        st.success("✅ CIU heatmap created successfully")
+        return fig
+    
+    def create_stacked_plot(self, data: np.ndarray, settings: ORIGAMISettings) -> plt.Figure:
+        """Create stacked CCS distribution plot"""
+        # Get unique CV values
+        unique_cvs = np.unique(data[:, 2])
+        unique_cvs = unique_cvs[::2]  # Take every other CV for clarity
         
-        # FIXED: Start with padding and calculate better positioning
-        y_start_padding = vertical_spacing * 0.5  # Add some bottom padding
-        y_start = settings.y_min - ccs_range * 0.1 + y_start_padding  # Start below CCS range
+        fig, ax = plt.subplots(figsize=(settings.figure_size, settings.figure_size * 1.2), 
+                              dpi=settings.dpi)
+        fig.patch.set_facecolor('white')
         
-        for plot_index, cv_value in enumerate(selected_cvs):
-            # Find corresponding intensity data
-            grid_cv_values = np.linspace(settings.x_min, settings.x_max, num=settings.grid_resolution)
-            closest_grid_idx = np.argmin(np.abs(grid_cv_values - cv_value))
+        # Create color map
+        colors = plt.cm.viridis(np.linspace(0, 1, len(unique_cvs)))
+        
+        offset = 0
+        max_intensity = 0
+        
+        for i, cv in enumerate(unique_cvs):
+            # Extract data for this CV
+            cv_mask = np.abs(data[:, 2] - cv) < 0.5  # Small tolerance for CV matching
+            cv_data = data[cv_mask]
             
-            intensity_data = Z[:, closest_grid_idx].copy()
-            
-            if np.max(intensity_data) <= 0:
+            if len(cv_data) == 0:
                 continue
             
-            # Y-axis positioning - each trace moves up by vertical_spacing
-            base_y_position = y_start + (plot_index * vertical_spacing)
+            # Sort by CCS
+            sort_idx = np.argsort(cv_data[:, 0])
+            ccs_vals = cv_data[sort_idx, 0]
+            intensities = cv_data[sort_idx, 3]
             
-            # FIXED: Better intensity scaling to make traces more visible
-            scaled_intensity = intensity_data * max_trace_height
+            # Normalize intensities
+            if np.max(intensities) > 0:
+                intensities = intensities / np.max(intensities)
             
-            y_coordinates = base_y_position + scaled_intensity
-            baseline_y = np.full_like(ccs_values, base_y_position)
+            max_intensity = max(max_intensity, np.max(intensities))
             
-            color = colors[plot_index % len(colors)]
+            # Plot trace
+            y_vals = intensities + offset
+            ax.plot(ccs_vals, y_vals, color=colors[i], linewidth=1.5, label=f'{cv:.0f}V')
+            ax.fill_between(ccs_vals, offset, y_vals, color=colors[i], alpha=0.3)
             
-            ax.plot(ccs_values, y_coordinates, 
-                   color=color, 
-                   linewidth=settings.stacked_line_width, 
-                   alpha=0.9)
-            
-            ax.fill_between(ccs_values, baseline_y, y_coordinates,
-                          color=color, alpha=settings.stacked_fill_alpha)
-            
-            y_tick_positions.append(base_y_position)
-            y_tick_labels.append(f"{cv_value:.0f}")
+            offset += 1.5  # Spacing between traces
         
-        # FIXED: Better Y-axis limits calculation
-        if y_tick_positions:
-            y_min_plot = min(y_tick_positions) - vertical_spacing * 0.3
-            y_max_plot = max(y_tick_positions) + max_trace_height + vertical_spacing * 0.3
-            
-            ax.set_ylim(y_min_plot, y_max_plot)
-            
-            # Handle CV labels
-            if settings.stacked_show_labels:
-                ax.set_yticks(y_tick_positions)
-                ax.set_yticklabels(y_tick_labels)
-            else:
-                ax.set_yticks([])
-                ax.set_yticklabels([])
-
-        # ORIGAMI axis configuration
-        ax.set_xlabel("CCS (Å²)", fontsize=settings.font_size, fontweight='normal', color='black')
-        
-        # Y-axis label depends on whether CV labels are shown
-        if settings.stacked_show_labels:
-            ax.set_ylabel("Collision Voltage (V)", fontsize=settings.font_size, fontweight='normal', color='black')
-        else:
-            ax.set_ylabel("Normalised Intensity", fontsize=settings.font_size, fontweight='normal', color='black')
-        
-        ax.set_xlim(settings.y_min, settings.y_max)  # CCS range on X-axis
-
-        # ORIGAMI styling
-        for spine_name in ['top', 'right', 'left', 'bottom']:
-            ax.spines[spine_name].set_visible(True)
-            ax.spines[spine_name].set_color('black')
-            ax.spines[spine_name].set_linewidth(1.5)
-        
-        ax.tick_params(axis='x', labelsize=settings.font_size * 0.9, colors='black', width=1.2)
-        ax.tick_params(axis='y', labelsize=settings.font_size * 0.9, colors='black', width=1.2)
-        
-        if hasattr(settings, 'show_grid') and settings.show_grid:
-            ax.grid(True, alpha=0.1, axis='x', linestyle='-', linewidth=0.5)
-        
-        ax.set_facecolor('white')
-        plt.tight_layout()
-        
-        return fig, filtered_data
-
-    def create_heatmap(self, data: np.ndarray, settings: HeatmapSettings, plot_type: str = "heatmap") -> Tuple[plt.Figure, np.ndarray]:
-        """Create CIU visualization with specified settings"""
-        if plot_type == "stacked":
-            return self.create_stacked_ccsd_plot_origami(data, settings)
-        
-        X, Y, Z, filtered_data = self.create_interpolation_grid_origami(data, settings)
-        Z = self.apply_smoothing_origami(Z, settings)
-        
-        fig, ax = plt.subplots(figsize=(settings.figure_size, settings.figure_size), dpi=settings.dpi)
-        fig.patch.set_facecolor('white')
-        
-        cmap = settings.custom_cmap if settings.custom_cmap is not None else settings.color_map
-        c = ax.pcolormesh(X, Y, Z, cmap=cmap, shading='auto')
-        
-        self._setup_plot_appearance(ax, settings)
-        self._add_colorbar(fig, ax, c, settings)
-        self._add_reference_lines(ax, settings)
+        ax.set_xlabel('CCS (Å²)', fontsize=settings.font_size)
+        ax.set_ylabel('Collision Voltage (V)', fontsize=settings.font_size)
+        ax.set_title('Stacked CCS Distributions', fontsize=settings.font_size + 2)
         
         plt.tight_layout()
-        return fig, filtered_data
+        return fig
 
-class CIUInterface:
-    """Handles Streamlit UI components"""
+class ORIGAMIInterface:
+    """Streamlit interface for ORIGAMI-style CIU analysis"""
     
-    def __init__(self, config: AppConfig = None):
-        self.config = config or AppConfig()
+    def __init__(self):
+        self.processor = ORIGAMIDataProcessor()
+        self.visualizer = ORIGAMIVisualizer()
     
-    @staticmethod
-    def show_main_header():
-        """Display main page header"""
+    def show_header(self):
+        """Display application header"""
         st.markdown("""
-        <div class="main-header">
-            <h1>📊 Plot aIMS/CIU Heatmaps</h1>
-            <p>Generate publication-ready CIU heatmaps from TWIMExtract data with ORIGAMI-style processing</p>
+        <div style="text-align: center; padding: 20px; background: linear-gradient(90deg, #667eea 0%, #764ba2 100%); border-radius: 10px; margin-bottom: 30px;">
+            <h1 style="color: white; margin: 0;">🔬 ORIGAMI-Style CIU Analysis</h1>
+            <p style="color: white; margin: 10px 0 0 0; font-size: 18px;">Process TWIMExtract files with ORIGAMI methods</p>
         </div>
         """, unsafe_allow_html=True)
     
-    @staticmethod
-    def show_upload_section() -> Tuple[Optional[Any], Optional[Any]]:
+    def file_upload_section(self) -> Tuple[Optional[Any], Optional[Any]]:
         """Handle file uploads"""
         st.header("📁 File Upload")
         
-        twim_extract_file = st.file_uploader(
-            "TWIM Extract CSV", 
-            type="csv", 
-            help="Upload your TWIMExtract output file"
-        )
-        calibration_file = st.file_uploader(
-            "Calibration CSV", 
-            type="csv", 
-            help="Upload your calibration file with CCS values"
-        )
+        col1, col2 = st.columns(2)
         
-        return twim_extract_file, calibration_file
+        with col1:
+            st.subheader("TWIMExtract Data")
+            twim_file = st.file_uploader(
+                "Upload TWIMExtract CSV", 
+                type="csv", 
+                help="TWIMExtract output file with collision voltage data"
+            )
+        
+        with col2:
+            st.subheader("Calibration Data")
+            cal_file = st.file_uploader(
+                "Upload Calibration CSV", 
+                type="csv", 
+                help="Calibration file with Z, Drift, CCS columns"
+            )
+        
+        return twim_file, cal_file
     
-    @staticmethod
-    def get_processing_settings() -> ProcessingSettings:
-        """Get processing configuration from user"""
+    def processing_settings_section(self) -> Dict[str, Any]:
+        """Get processing settings"""
         st.header("⚙️ Processing Settings")
         
-        data_type_str = st.selectbox("Instrument Type", ["Synapt", "Cyclic"])
-        data_type = InstrumentType.SYNAPT if data_type_str == "Synapt" else InstrumentType.CYCLIC
-        charge_state = st.number_input("Charge State (Z)", min_value=1, max_value=100, value=1)
+        col1, col2 = st.columns(2)
         
-        inject_time = None
-        if data_type == InstrumentType.CYCLIC:
-            inject_time = st.number_input("Injection Time (ms)", min_value=0.0, value=0.0, step=0.1)
+        with col1:
+            st.subheader("Data Parameters")
+            charge_state = st.number_input("Charge State (Z)", min_value=1, max_value=50, value=10)
+            instrument_type = st.selectbox("Instrument Type", ["Synapt", "Cyclic IMS"])
+            
+            inject_time = 0.0
+            if instrument_type == "Cyclic IMS":
+                inject_time = st.number_input("Injection Time (ms)", min_value=0.0, value=0.0, step=0.1)
         
-        return ProcessingSettings(
-            data_type=data_type,
-            charge_state=charge_state,
-            inject_time=inject_time
-        )
+        with col2:
+            st.subheader("Grid Settings")
+            grid_resolution = st.number_input("Grid Resolution", min_value=50, max_value=500, value=200)
+            interpolation = st.selectbox("Interpolation Method", ["cubic", "linear", "nearest"])
+        
+        return {
+            "charge_state": charge_state,
+            "instrument_type": instrument_type,
+            "inject_time": inject_time,
+            "grid_resolution": grid_resolution,
+            "interpolation_method": interpolation
+        }
     
-    @staticmethod
-    def get_heatmap_settings(data_range: Dict[str, float]) -> Tuple[HeatmapSettings, str]:
-        """Get heatmap visualization settings"""
-        plot_type = st.radio("Visualization Type", 
-                           ["Heatmap", "Stacked CCSDs"], 
-                           help="Choose between traditional CIU heatmap or stacked CCSD plot")
+    def visualization_settings_section(self) -> ORIGAMISettings:
+        """Get visualization settings"""
+        st.header("🎨 Visualization Settings")
         
-        if plot_type == "Stacked CCSDs":
-            tab1, tab2, tab3, tab4, tab5 = st.tabs(["🎨 Appearance", "📐 Data Processing", "📊 Stacked Options", "📏 Axis Settings", "📍 Annotations"])
-        else:
-            tab1, tab2, tab3, tab4 = st.tabs(["🎨 Appearance", "📐 Data Processing", "📏 Axis Settings", "📍 Annotations"])
-        
-        settings_dict = {}
+        # Create tabs for different setting categories
+        tab1, tab2, tab3, tab4 = st.tabs(["🎨 Appearance", "📐 Processing", "🔧 Advanced", "📊 Plot Type"])
         
         with tab1:
             col1, col2 = st.columns(2)
             
             with col1:
-                st.subheader("Color Settings")
-                colormap_type = st.selectbox("Colormap Type", ["Standard", "Seaborn Colorblind"])
+                st.subheader("Colors & Style")
+                colormap = st.selectbox("Colormap", [
+                    "viridis", "plasma", "inferno", "cividis", "coolwarm", 
+                    "Blues", "Greens", "Reds", "YlOrRd", "hot"
+                ])
+                show_colorbar = st.checkbox("Show Colorbar", value=True)
                 
-                if colormap_type == "Standard":
-                    color_map = st.selectbox("Color Map", [
-                        "viridis", "plasma", "inferno", "cividis", "coolwarm", "magma", 
-                        "Blues", "Greens", "Purples", "Oranges", "Reds", "jet"
-                    ])
-                    custom_cmap = None
-                else:
-                    colorblind_options = ['pink', 'blue', 'orange', 'green', 'red', 'purple', 'brown', 'gray', 'olive', 'cyan']
-                    colorblind_color = st.selectbox("Colorblind Color", colorblind_options)
-                    custom_cmap = CIUVisualization.create_colorblind_cmap(colorblind_color)
-                    color_map = None
-                
-                settings_dict.update({'custom_cmap': custom_cmap, 'color_map': color_map})
-            
             with col2:
-                st.subheader("Plot Settings")
-                font_size = st.number_input("Font Size", min_value=6, max_value=30, value=12)
-                figure_size = st.number_input("Figure Size (inches)", min_value=4, max_value=20, value=10)
-                dpi = st.number_input("Resolution (DPI)", min_value=50, max_value=1000, value=300, step=50)
-                
-                if plot_type == "Heatmap":
-                    st.subheader("Colorbar Settings")
-                    show_colorbar = st.checkbox("Show colorbar", value=True)
-                    colorbar_shrink = 0.8
-                    colorbar_aspect = 20
-                    if show_colorbar:
-                        colorbar_shrink = st.number_input("Colorbar size", min_value=0.3, max_value=1.0, value=0.8, step=0.05)
-                        colorbar_aspect = st.number_input("Colorbar aspect ratio", min_value=10, max_value=50, value=20)
-                else:
-                    show_colorbar = False
-                    colorbar_shrink = 0.8
-                    colorbar_aspect = 20
-                    
-                    st.subheader("Grid Settings")
-                    show_grid = st.checkbox("Show subtle grid", value=False)
-                    settings_dict.update({'show_grid': show_grid})
-                
-                settings_dict.update({
-                    'font_size': font_size, 'figure_size': figure_size, 'dpi': dpi,
-                    'show_colorbar': show_colorbar, 'colorbar_shrink': colorbar_shrink, 'colorbar_aspect': colorbar_aspect
-                })
+                st.subheader("Fonts & Size")
+                font_size = st.number_input("Font Size", min_value=8, max_value=20, value=12)
+                figure_size = st.number_input("Figure Size", min_value=4.0, max_value=15.0, value=8.0, step=0.5)
+                dpi = st.number_input("Resolution (DPI)", min_value=100, max_value=600, value=300, step=50)
         
         with tab2:
             col1, col2 = st.columns(2)
             
             with col1:
-                st.subheader("Interpolation")
-                interpolation_method = st.selectbox("Method", ["cubic", "linear", "nearest"])
-                x_grid_resolution = st.number_input("CV Grid Resolution", min_value=50, max_value=500, value=200, step=10)
-                y_grid_resolution = st.number_input("CCS Grid Resolution", min_value=50, max_value=500, value=200, step=10)
+                st.subheader("Normalization")
+                normalize_data = st.checkbox("Normalize Data", value=True)
+                normalization_mode = st.selectbox("Normalization Mode", [
+                    "Maximum", "Logarithmic", "Natural log", "Square root"
+                ])
                 
-                if plot_type == "Heatmap":
-                    # ORIGAMI-style normalization option for heatmaps only
-                    normalize_data = st.checkbox("Normalize data (ORIGAMI-style)", value=True, 
-                                                help="Apply ORIGAMI Maximum normalization to each CV column")
-                    if normalize_data:
-                        st.info("✅ ORIGAMI normalization: each CV column max = 1")
-                    else:
-                        st.info("ℹ️ Raw intensity values preserved")
-                else:
-                    # Stacked plots always normalized
-                    normalize_data = True
-                    st.info("✅ ORIGAMI normalization always applied for stacked plots")
-                
-                settings_dict.update({
-                    'interpolation_method': interpolation_method, 
-                    'grid_resolution': max(x_grid_resolution, y_grid_resolution),  # for backward compatibility
-                    'x_grid_resolution': x_grid_resolution,
-                    'y_grid_resolution': y_grid_resolution,
-                    'normalize_data': normalize_data
-                })
-            
-            with col2:
-                st.subheader("Smoothing (ORIGAMI-style)")
-                apply_smoothing = st.checkbox("Apply smoothing")
-                
-                smoothing_type = 'savgol'
-                window_length = 11
-                poly_order = 3
-                gaussian_sigma = 2.0
-                noise_threshold = 0.0
-                apply_intensity_threshold = False
-                intensity_min_threshold = 0.0
-                intensity_max_threshold = 1.0
-                
+                st.subheader("Smoothing")
+                apply_smoothing = st.checkbox("Apply Smoothing", value=False)
                 if apply_smoothing:
-                    smoothing_type = st.selectbox("Smoothing Type", ["savgol", "gaussian"])
-                    
-                    if smoothing_type == "savgol":
-                        window_length = st.number_input("Window Length", min_value=3, max_value=51, value=11, step=2)
-                        poly_order = st.number_input("Polynomial Order", min_value=1, max_value=6, value=3)
-                    else:  # gaussian
-                        gaussian_sigma = st.number_input("Gaussian Sigma", min_value=0.1, max_value=10.0, value=2.0, step=0.1)
+                    smoothing_type = st.selectbox("Smoothing Type", ["gaussian", "savgol"])
+                    if smoothing_type == "gaussian":
+                        gaussian_sigma = st.number_input("Gaussian Sigma", min_value=0.1, max_value=5.0, value=2.0, step=0.1)
+                        savgol_window = 11
+                        savgol_polyorder = 3
+                    else:
+                        gaussian_sigma = 2.0
+                        savgol_window = st.number_input("Window Size", min_value=3, max_value=21, value=11, step=2)
+                        savgol_polyorder = st.number_input("Polynomial Order", min_value=1, max_value=6, value=3)
+                else:
+                    smoothing_type = "gaussian"
+                    gaussian_sigma = 2.0
+                    savgol_window = 11
+                    savgol_polyorder = 3
+            
+            with col2:
+                st.subheader("Noise Reduction")
+                noise_threshold = st.number_input("Noise Threshold", min_value=0.0, max_value=1.0, value=0.0, step=0.01)
                 
-                st.subheader("Post-processing")
-                noise_threshold = st.number_input("Noise Threshold", min_value=0.0, max_value=1.0, value=0.0, step=0.01,
-                                                help="Remove values below this threshold")
-                
-                apply_intensity_threshold = st.checkbox("Apply intensity thresholding")
+                apply_intensity_threshold = st.checkbox("Apply Intensity Thresholding", value=False)
                 if apply_intensity_threshold:
-                    intensity_min_threshold = st.number_input("Min Intensity Threshold (%)", min_value=0.0, max_value=100.0, value=0.0, step=1.0) / 100
-                    intensity_max_threshold = st.number_input("Max Intensity Threshold (%)", min_value=0.0, max_value=100.0, value=100.0, step=1.0) / 100
-                
-                settings_dict.update({
-                    'apply_smoothing': apply_smoothing, 'smoothing_type': smoothing_type,
-                    'window_length': window_length, 'poly_order': poly_order, 'gaussian_sigma': gaussian_sigma,
-                    'noise_threshold': noise_threshold, 'apply_intensity_threshold': apply_intensity_threshold,
-                    'intensity_min_threshold': intensity_min_threshold, 'intensity_max_threshold': intensity_max_threshold
-                })
+                    intensity_min_threshold = st.number_input("Min Intensity (%)", min_value=0.0, max_value=100.0, value=0.0) / 100
+                    intensity_max_threshold = st.number_input("Max Intensity (%)", min_value=0.0, max_value=100.0, value=100.0) / 100
+                else:
+                    intensity_min_threshold = 0.0
+                    intensity_max_threshold = 1.0
         
-        # Stacked plot specific options
-        if plot_type == "Stacked CCSDs":
-            with tab3:
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    st.subheader("Trace Selection")
-                    stacked_label_frequency = st.number_input("Trace Frequency", 
-                                                min_value=1, max_value=20, value=1, step=1,
-                                                help="Show every Nth trace (1 = all traces, 2 = every other trace, etc.)")
-
-                    st.subheader("Y-axis Offset Settings")
-                    stacked_offset_mode = st.selectbox("Offset Mode", 
-                     ["auto", "percentage", "manual"],
-                     help="auto: even spacing, percentage: % of trace height, manual: multiplier of trace height")
-
-                    stacked_offset_value = 1.0
-                    if stacked_offset_mode == "manual":
-                        stacked_offset_value = st.number_input("Offset Multiplier", 
-                         min_value=0.1, max_value=5.0, value=1.0, step=0.1,
-                         help="Multiplier of trace height (0.5 = halfway overlap, 1.0 = no overlap, 2.0 = double spacing)")
-                    elif stacked_offset_mode == "percentage":
-                        stacked_offset_value = st.number_input("Offset Percentage", 
-                         min_value=10.0, max_value=500.0, value=100.0, step=10.0,
-                         help="Percentage of trace height (50% = halfway overlap, 100% = no overlap)")
-                    else:  # auto
-                        st.info("Auto mode: traces evenly spaced across Y-axis range")
-
-                with col2:
-                    st.subheader("Trace Appearance")
-                    stacked_line_width = st.number_input("Line Width", min_value=0.5, max_value=5.0, value=1.5, step=0.1)
-                    stacked_fill_alpha = st.number_input("Fill Transparency", min_value=0.0, max_value=1.0, value=0.3, step=0.05)
-
-                    st.subheader("Color Settings")
-                    stacked_line_color_mode = st.selectbox("Color Mode", 
-                                             ["gradient", "single", "colorblind_cycle"],
-                                             help="gradient: color map, single: one color, colorblind_cycle: distinct colors")
-
-                    stacked_single_color = '#1f77b4'  # Default blue
-                    if stacked_line_color_mode == "single":
-                        stacked_single_color = st.color_picker("Single Color", value='#1f77b4')
-                    elif stacked_line_color_mode == "gradient":
-                        st.info("Gradient colors will use the selected colormap from Appearance tab")
-                    else:  # colorblind_cycle
-                        st.info("Using colorblind-friendly color cycle")
-
-                    st.subheader("Labels")
-                    stacked_show_labels = st.checkbox("Show CV labels on Y-axis", value=True)
-                    
-                    # Add info about automatic normalization
-                    st.info("✅ ORIGAMI grid normalization automatically applied to all traces")
-
-            # Update settings_dict to remove the normalization settings:
-            settings_dict.update({
-                'stacked_label_frequency': stacked_label_frequency,
-                'stacked_offset_mode': stacked_offset_mode,
-                'stacked_offset_value': stacked_offset_value,
-                'stacked_line_width': stacked_line_width,
-                'stacked_fill_alpha': stacked_fill_alpha,
-                'stacked_line_color_mode': stacked_line_color_mode,
-                'stacked_single_color': stacked_single_color,
-                'stacked_show_labels': stacked_show_labels
-                # REMOVED: stacked_normalize_individual and stacked_baseline_correction
-            })
-
-            axis_tab = tab4
-            annotation_tab = tab5
-        else:
-            # Set default values for stacked settings when not in stacked mode
-            settings_dict.update({
-                'stacked_label_frequency': 1,
-                'stacked_offset_mode': 'auto',
-                'stacked_offset_value': 1.0,
-                'stacked_line_width': 1.5,
-                'stacked_fill_alpha': 0.3,
-                'stacked_line_color_mode': 'gradient',
-                'stacked_single_color': '#1f77b4',
-                'stacked_show_labels': True
-                # REMOVED: stacked_normalize_individual and stacked_baseline_correction defaults
-            })
-            axis_tab = tab3
-            annotation_tab = tab4
+        with tab3:
+            st.subheader("Advanced Settings")
+            grid_resolution = st.number_input("Grid Resolution (Advanced)", min_value=50, max_value=1000, value=200)
+            colorbar_width = st.number_input("Colorbar Width (%)", min_value=1.0, max_value=10.0, value=5.0)
+            colorbar_pad = st.number_input("Colorbar Padding", min_value=0.01, max_value=0.2, value=0.05, step=0.01)
         
-        with axis_tab:
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                st.subheader("Collision Voltage Range")
-                x_min, x_max = st.slider("CV Range (V)", 
-                                        data_range['x_min'], data_range['x_max'], 
-                                        (data_range['x_min'], data_range['x_max']))
-            
-            with col2:
-                st.subheader("CCS Range")
-                y_min, y_max = st.slider("CCS Range (Å²)", 
-                                        data_range['y_min'], data_range['y_max'], 
-                                        (data_range['y_min'], data_range['y_max']))
-            
-            settings_dict.update({'x_min': x_min, 'x_max': x_max, 'y_min': y_min, 'y_max': y_max})
+        with tab4:
+            plot_type = st.radio("Plot Type", ["CIU Heatmap", "Stacked CCS Distributions"])
         
-        with annotation_tab:
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                st.subheader("Reference Line Settings")
-                reference_line_color = st.selectbox("Reference Line Color", ["black", "white"])
-                settings_dict.update({'reference_line_color': reference_line_color})
-                
-                st.subheader("Vertical Reference Lines")
-                num_x_lines = st.slider("Number of vertical lines", 0, 5, 0)
-                x_values, x_labels = [], []
-                for i in range(num_x_lines):
-                    subcol1, subcol2 = st.columns(2)
-                    with subcol1:
-                        value = st.number_input(f"X-value {i+1}", min_value=x_min, max_value=x_max, 
-                                              value=(x_min + x_max)/2, key=f"x_val_{i}")
-                    with subcol2:
-                        label = st.text_input(f"X-label {i+1}", value=f"Line {i+1}", key=f"x_label_{i}")
-                    x_values.append(value)
-                    x_labels.append(label)
-            
-            with col2:
-                st.write("")
-                st.write("")
-                st.subheader("Horizontal Reference Lines")
-                num_y_lines = st.slider("Number of horizontal lines", 0, 5, 0)
-                y_values, y_labels = [], []
-                for i in range(num_y_lines):
-                    subcol1, subcol2 = st.columns(2)
-                    with subcol1:
-                        value = st.number_input(f"Y-value {i+1}", min_value=y_min, max_value=y_max, 
-                                              value=(y_min + y_max)/2, key=f"y_val_{i}")
-                    with subcol2:
-                        label = st.text_input(f"Y-label {i+1}", value=f"Line {i+1}", key=f"y_label_{i}")
-                    y_values.append(value)
-                    y_labels.append(label)
-            
-            settings_dict.update({'x_values': x_values, 'x_labels': x_labels, 'y_values': y_values, 'y_labels': y_labels})
+        # Create settings object
+        settings = ORIGAMISettings(
+            grid_resolution=grid_resolution,
+            interpolation_method="cubic",
+            normalize_data=normalize_data,
+            normalization_mode=normalization_mode,
+            apply_smoothing=apply_smoothing,
+            smoothing_type=smoothing_type,
+            gaussian_sigma=gaussian_sigma,
+            savgol_window=savgol_window,
+            savgol_polyorder=savgol_polyorder,
+            noise_threshold=noise_threshold,
+            apply_intensity_threshold=apply_intensity_threshold,
+            intensity_min_threshold=intensity_min_threshold,
+            intensity_max_threshold=intensity_max_threshold,
+            colormap=colormap,
+            show_colorbar=show_colorbar,
+            colorbar_width=colorbar_width,
+            colorbar_pad=colorbar_pad,
+            font_size=font_size,
+            figure_size=figure_size,
+            dpi=dpi
+        )
         
-        plot_type_code = "stacked" if plot_type == "Stacked CCSDs" else "heatmap"
-        return HeatmapSettings(**settings_dict), plot_type_code
-
-    @staticmethod
-    def show_download_options(dpi: int):
-        """Show download buttons for generated plots with custom filenames"""
-        if "current_figure" in st.session_state and "processed_data" in st.session_state:
-            st.subheader("💾 Download Options")
-            
-            # Add custom filename input
-            col1, col2 = st.columns([2, 1])
-            with col1:
-                custom_filename = st.text_input(
-                    "Custom filename (without extension)",
-                    value="ciu_heatmap",
-                    help="Enter a custom name for your files"
-                )
-            with col2:
-                st.write("")  # Spacing
-                st.write("")  # More spacing
-                if not custom_filename:
-                    st.warning("⚠️ Please enter a filename")
-                    return
-            
-            # Download buttons with custom filenames
+        return settings, plot_type
+    
+    def download_section(self, fig: plt.Figure, data: np.ndarray):
+        """Provide download options"""
+        st.header("💾 Download Results")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            filename = st.text_input("Base filename", value="ciu_analysis", help="Enter filename without extension")
+        
+        with col2:
+            st.write("")  # Spacing
+            st.write("")
+        
+        if filename:
             col1, col2, col3 = st.columns(3)
             
             with col1:
-                csv_data = pd.DataFrame(st.session_state["processed_data"], 
-                                      columns=["CCS (Å²)", "Drift Time (ms)", "Collision Voltage (V)", "Intensity"])
-                csv = csv_data.to_csv(index=False).encode('utf-8')
-                st.download_button(
-                    "📄 Download CSV", 
-                    data=csv, 
-                    file_name=f"{custom_filename}.csv", 
-                    mime="text/csv"
-                )
-            
-            with col2:
+                # PNG download
                 img_png = BytesIO()
-                st.session_state["current_figure"].savefig(img_png, format='png', bbox_inches="tight", dpi=dpi)
+                fig.savefig(img_png, format='png', bbox_inches='tight', dpi=300)
                 img_png.seek(0)
                 st.download_button(
-                    "🖼️ Download PNG", 
-                    data=img_png, 
-                    file_name=f"{custom_filename}.png", 
+                    "📊 Download PNG",
+                    data=img_png,
+                    file_name=f"{filename}.png",
                     mime="image/png"
                 )
             
-            with col3:
+            with col2:
+                # SVG download
                 img_svg = BytesIO()
-                st.session_state["current_figure"].savefig(img_svg, format='svg', bbox_inches="tight")
+                fig.savefig(img_svg, format='svg', bbox_inches='tight')
                 img_svg.seek(0)
                 st.download_button(
-                    "📐 Download SVG", 
-                    data=img_svg, 
-                    file_name=f"{custom_filename}.svg", 
+                    "📐 Download SVG",
+                    data=img_svg,
+                    file_name=f"{filename}.svg",
                     mime="image/svg+xml"
                 )
-    
-    @staticmethod
-    def show_instructions():
-        """Show usage instructions"""
-        st.info("👆 Please upload your TWIM Extract and calibration files in the sidebar to get started.")
-        
-        with st.expander("ℹ️ How to Use This Tool"):
-            st.markdown("""
-            ### Step-by-Step Instructions:
             
-            1. **Upload Files**: 
-               - Upload your TWIM Extract CSV file
-               - Upload your calibration CSV file with CCS values
-            
-            2. **Configure Processing**:
-               - Select your instrument type (Synapt or Cyclic)
-               - Enter the charge state (Z) for your analysis
-               - For Cyclic data, specify the injection time
-            
-            3. **Process Data**: Click "Process Data" to calibrate your measurements
-            
-            4. **Customize Visualization**:
-               - **Appearance**: Choose colors, fonts, and plot size
-               - **Data Processing**: Set interpolation, ORIGAMI normalization, and smoothing
-               - **Axis Settings**: Define the CV (V) and CCS (Å²) ranges to display
-               - **Annotations**: Add reference lines with labels
-            
-            5. **Generate & Download**: Create your heatmap and download in multiple formats
-               - Enter a custom filename for your downloads
-               - Choose from PNG, SVG, or CSV formats
-            
-            ### Features:
-            - ✅ ORIGAMI-style data processing and normalization
-            - ✅ Origin-style professional heatmaps
-            - ✅ Colorblind-friendly palettes
-            - ✅ Advanced smoothing and interpolation
-            - ✅ Stacked CCSD visualization option
-            - ✅ Multiple export formats with custom filenames
-            - ✅ Proper units: CCS in Å², CV in V, Drift Time in ms
-            """)
+            with col3:
+                # Data CSV download
+                df_data = pd.DataFrame(data, columns=["CCS (Å²)", "Drift Time (ms)", "CV (V)", "Intensity"])
+                csv_data = df_data.to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    "📄 Download CSV",
+                    data=csv_data,
+                    file_name=f"{filename}_data.csv",
+                    mime="text/csv"
+                )
 
 def main():
     """Main application function"""
     st.set_page_config(
-        page_title="Plot aIMS/CIU Heatmaps",
-        page_icon="📊",
+        page_title="ORIGAMI-Style CIU Analysis",
+        page_icon="🔬",
         layout="wide"
     )
     
-    styling.load_custom_css()
+    # Load custom styling if available
+    if styling:
+        styling.load_custom_css()
     
-    # Initialize components with shared config
-    config = AppConfig()
-    interface = CIUInterface(config)
-    processor = CIUDataProcessor(config)
-    visualizer = CIUVisualization(config)
+    # Initialize interface
+    interface = ORIGAMIInterface()
+    interface.show_header()
     
-    interface.show_main_header()
+    # File upload section
+    twim_file, cal_file = interface.file_upload_section()
     
-    if st.button("🧹 Clear Cache & Restart App"):
-        import_tools.clear_cache()
-    
-    with st.sidebar:
-        twim_extract_file, calibration_file = interface.show_upload_section()
+    if twim_file and cal_file:
+        # Processing settings
+        proc_settings = interface.processing_settings_section()
         
-        if twim_extract_file and calibration_file:
-            processing_settings = interface.get_processing_settings()
-            
-            if st.button("🔄 Process Data", type="primary"):
-                try:
-                    with streamlit_spinner("Processing data..."):
-                        twim_df = processor.load_twim_extract(twim_extract_file)
-                        cal_data = processor.load_calibration_data(
-                            calibration_file, 
-                            processing_settings.charge_state
-                        )
-                        
-                        twim_df = processor.apply_drift_correction(twim_df, processing_settings)
-                        
-                        # Pass inject_time to calibration
-                        inject_time = processing_settings.inject_time if processing_settings.inject_time is not None else 0.0
-                        calibrated_array = processor.calibrate_data(twim_df, cal_data, inject_time)
-                        
-                        st.session_state["calibrated_array"] = calibrated_array
-                        st.session_state["processing_settings"] = processing_settings
-                        
-                        st.success("✅ Data processed successfully!")
-                        
-                        df_preview = pd.DataFrame(calibrated_array[:100], 
-                                                columns=["CCS (Å²)", "Drift Time (ms)", "CV (V)", "Intensity"])
-                        st.dataframe(df_preview, height=200)
-                        st.info(f"Processed {len(calibrated_array):,} data points")
-                        
-                        # Update the preview DataFrame to show proper units
-                        df_preview = pd.DataFrame(calibrated_array[:100], 
-                                                columns=["CCS (Å²)", "Drift Time (ms)", "CV (V)", "Intensity"])
-                        st.dataframe(df_preview, height=200)
-                        st.info(f"Processed {len(calibrated_array):,} data points")
-                        
-                except Exception as e:
-                    st.error(f"❌ Error processing data: {str(e)}")
-    
-    if "calibrated_array" in st.session_state:
-        calibrated_array = st.session_state["calibrated_array"]
-        
-        data_range = {
-            'x_min': float(calibrated_array[:, 2].min()),
-            'x_max': float(calibrated_array[:, 2].max()),
-            'y_min': float(calibrated_array[:, 0].min()),
-            'y_max': float(calibrated_array[:, 0].max())
-        }
-        
-        st.subheader("📊 Visualization Settings")
-        heatmap_settings, plot_type = interface.get_heatmap_settings(data_range)
-        
-        # REMOVE any diagnostic calls here - go straight to visualization
-        button_text = "🎨 Generate Stacked CCSDs" if plot_type == "stacked" else "🎨 Generate CIU Heatmap"
-        if st.button(button_text, type="primary", use_container_width=True):
+        # Process data button
+        if st.button("🔄 Process Data", type="primary", use_container_width=True):
             try:
-                with streamlit_spinner("Generating visualization..."):
-                    fig, processed_data = visualizer.create_heatmap(calibrated_array, heatmap_settings, plot_type)
+                with st.spinner("Processing data with ORIGAMI methods..."):
+                    # Load files
+                    twim_df = interface.processor.load_twim_extract(twim_file)
+                    cal_data = interface.processor.load_calibration_data(cal_file, proc_settings["charge_state"])
                     
-                    st.pyplot(fig)
+                    # Calibrate data
+                    calibrated_data = interface.processor.calibrate_twim_data(
+                        twim_df, cal_data, proc_settings["inject_time"]
+                    )
                     
-                    st.session_state["current_figure"] = fig
-                    st.session_state["processed_data"] = processed_data
+                    # Store in session state
+                    st.session_state["calibrated_data"] = calibrated_data
+                    st.session_state["proc_settings"] = proc_settings
+                    
+                    st.success("✅ Data processed successfully!")
+                    
+                    # Show data preview
+                    st.subheader("📊 Data Preview")
+                    preview_df = pd.DataFrame(
+                        calibrated_data[:100], 
+                        columns=["CCS (Å²)", "Drift Time (ms)", "CV (V)", "Intensity"]
+                    )
+                    st.dataframe(preview_df, use_container_width=True)
                     
             except Exception as e:
-                st.error(f"❌ Error generating visualization: {str(e)}")
+                st.error(f"❌ Error processing data: {str(e)}")
+    
+    # Visualization section
+    if "calibrated_data" in st.session_state:
+        data = st.session_state["calibrated_data"]
         
-        interface.show_download_options(heatmap_settings.dpi)
+        st.header("📊 Visualization")
         
+        # Visualization settings
+        viz_settings, plot_type = interface.visualization_settings_section()
+        
+        # Generate plot button
+        if st.button("🎨 Generate Plot", type="primary", use_container_width=True):
+            try:
+                with st.spinner("Creating ORIGAMI-style visualization..."):
+                    if plot_type == "CIU Heatmap":
+                        fig = interface.visualizer.create_ciu_heatmap(data, viz_settings)
+                    else:
+                        fig = interface.visualizer.create_stacked_plot(data, viz_settings)
+                    
+                    st.pyplot(fig)
+                    st.session_state["current_figure"] = fig
+                    
+            except Exception as e:
+                st.error(f"❌ Error creating visualization: {str(e)}")
+        
+        # Download section
+        if "current_figure" in st.session_state:
+            interface.download_section(st.session_state["current_figure"], data)
+    
     else:
-        interface.show_instructions()
+        # Instructions
+        st.info("👆 Please upload your TWIMExtract and calibration files to get started.")
+        
+        with st.expander("ℹ️ How to Use This Tool"):
+            st.markdown("""
+            ### ORIGAMI-Style CIU Analysis Tool
+            
+            This tool replicates the data processing and visualization methods from ORIGAMI (Lukasz G. Migas) 
+            for analyzing Collision-Induced Unfolding (CIU) data from TWIMExtract files.
+            
+            **Steps:**
+            1. **Upload Files**: TWIMExtract CSV and calibration CSV files
+            2. **Set Parameters**: Choose charge state, instrument type, and processing options
+            3. **Process Data**: Calibrate drift times to CCS values using ORIGAMI methods
+            4. **Visualize**: Create publication-ready CIU heatmaps or stacked plots
+            5. **Download**: Export plots and data in multiple formats
+            
+            **Features:**
+            - **Automatic calibration validation**: Removes physically inconsistent points
+            - **Exact replication of ORIGAMI's normalize_2D function**
+            - **ORIGAMI-style smoothing and noise reduction**
+            - **Multiple normalization modes** (Maximum, Logarithmic, etc.)
+            - **High-quality publication-ready plots**
+            - **Support for both Synapt and Cyclic IMS data**
+            
+            **New in this version:**
+            - 🔍 **Calibration validation**: Automatically checks and removes points where:
+              - Small drift times have large CCS values (physically inconsistent)
+              - Non-monotonic CCS vs drift time relationships
+            - 📊 **Enhanced feedback**: Shows which points are removed and why
+            - ✅ **Quality metrics**: Reports correlation coefficients and data quality
+            
+            **File Formats:**
+            - **TWIMExtract**: CSV file with drift times and collision voltage data
+            - **Calibration**: CSV file with Z, Drift, CCS columns
+            """)
 
 if __name__ == "__main__":
     main()

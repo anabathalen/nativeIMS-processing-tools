@@ -403,6 +403,7 @@ class UIComponents:
         'Denatured Ubiquitin': 'ubiquitin',
         'Native BSA': 'BSA',
         'GRGDS Peptide': 'GRGDS',
+        'SDGRG Peptide': 'SDGRG'
     }
     
     @classmethod
