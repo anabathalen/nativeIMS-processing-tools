@@ -9,6 +9,13 @@ import io
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 import json
+from myutils.origami import (
+    safe_float_conversion,
+    remove_duplicate_values,
+    interpolate_matrix,
+    smooth_matrix_gaussian,
+    smooth_matrix_savgol,
+)
 
 st.title("CCS Conversion and Fingerprint Analysis")
 st.write("Convert drift times to CCS values and create fingerprint heatmaps")
@@ -95,52 +102,7 @@ def load_settings_from_dict(settings):
     for key, value in settings.items():
         st.session_state[key] = value
 
-def safe_float_conversion(value):
-    """Safely convert a value to float, handling sequences and invalid data"""
-    try:
-        # If it's already a number, return it
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
-            return float(value)
-        
-        # If it's a string, try to convert
-        if isinstance(value, str):
-            value = value.strip()
-            if value == '' or value.lower() in ['nan', 'null', 'none']:
-                return 0.0
-            return float(value)
-        
-        # If it's a sequence (list, array, etc.), take the first valid element
-        if hasattr(value, '__iter__') and not isinstance(value, str):
-            for item in value:
-                try:
-                    return safe_float_conversion(item)
-                except:
-                    continue
-            return 0.0
-        
-        # If all else fails, return 0
-        return 0.0
-        
-    except (ValueError, TypeError, AttributeError):
-        return 0.0
-
-def remove_duplicate_values(values, tolerance=1e-6):
-    """Remove duplicate values from an array, keeping the first occurrence"""
-    if len(values) <= 1:
-        return values, []
-    
-    values = np.array(values)
-    unique_mask = np.ones(len(values), dtype=bool)
-    
-    for i in range(1, len(values)):
-        # Check if current value is too close to any previous value
-        for j in range(i):
-            if unique_mask[j] and abs(values[i] - values[j]) < tolerance:
-                unique_mask[i] = False
-                break
-    
-    removed_indices = np.where(~unique_mask)[0]
-    return values[unique_mask], removed_indices
+## Moved helpers to myutils.origami: safe_float_conversion, remove_duplicate_values
 
 # Initialize settings loaded flag if not exists
 if 'settings_loaded' not in st.session_state:
@@ -755,103 +717,59 @@ if calibration_file and twim_file:
                     
                     # Apply 2D interpolation if multiplier > 1 (now on cleaned CCS data)
                     if interp_multiplier > 1:
-                        new_ccs_points = original_ccs_points * interp_multiplier
-                        new_trapcv_points = original_trapcv_points * interp_multiplier
-                        
-                        # Create new interpolated grids in CCS space
-                        new_ccs_values = np.linspace(ccs_values.min(), ccs_values.max(), new_ccs_points)
-                        new_trap_cv_values = np.linspace(trap_cv_values.min(), trap_cv_values.max(), new_trapcv_points)
-                        
-                        # Verify that original coordinates are strictly monotonic
+                        # Validate monotonicity
                         ccs_diffs = np.diff(ccs_values)
                         trapcv_diffs = np.diff(trap_cv_values)
-                        
                         if np.any(ccs_diffs <= 0):
                             st.error(f"CCS values are not strictly increasing. Min diff: {np.min(ccs_diffs)}")
                             st.stop()
-                        
                         if np.any(trapcv_diffs <= 0):
                             st.error(f"TrapCV values are not strictly increasing. Min diff: {np.min(trapcv_diffs)}")
                             st.stop()
-                        
-                        # Perform 2D interpolation on the CCS matrix
+
                         try:
-                            if interp_method == 'linear':
-                                # Use RegularGridInterpolator for linear interpolation
-                                interp_func = interpolate.RegularGridInterpolator(
-                                    (ccs_values, trap_cv_values),
-                                    intensity_matrix_original,
-                                    method='linear',
-                                    bounds_error=False,
-                                    fill_value=0.0
-                                )
-                                
-                                # Create meshgrids for interpolation
-                                new_trapcv_grid, new_ccs_grid = np.meshgrid(new_trap_cv_values, new_ccs_values)
-                                new_points = np.array([new_ccs_grid.ravel(), new_trapcv_grid.ravel()]).T
-                                new_intensities = interp_func(new_points).reshape(new_ccs_points, new_trapcv_points)
-                                
-                            else:  # cubic
-                                # Use RectBivariateSpline for cubic interpolation
-                                interp_func = interpolate.RectBivariateSpline(
-                                    ccs_values,
-                                    trap_cv_values,
-                                    intensity_matrix_original,
-                                    kx=min(3, len(ccs_values)-1),
-                                    ky=min(3, len(trap_cv_values)-1)
-                                )
-                                
-                                new_intensities = interp_func(new_ccs_values, new_trap_cv_values)
-                            
-                            # Update variables with interpolated data
-                            ccs_values = new_ccs_values
-                            trap_cv_values = new_trap_cv_values
-                            intensity_matrix_final = new_intensities
-                            
-                            st.info(f"2D interpolation: {original_ccs_points}×{original_trapcv_points} → {new_ccs_points}×{new_trapcv_points} points using {interp_method} method")
-                            st.info(f"Total points increased from {original_ccs_points * original_trapcv_points} to {new_ccs_points * new_trapcv_points}")
-                            
+                            ccs_values, trap_cv_values, intensity_matrix_final = interpolate_matrix(
+                                ccs_values,
+                                trap_cv_values,
+                                intensity_matrix_original,
+                                method=interp_method,
+                                multiplier=interp_multiplier,
+                            )
+                            st.info(
+                                f"2D interpolation: {original_ccs_points}×{original_trapcv_points} → "
+                                f"{len(ccs_values)}×{len(trap_cv_values)} points using {interp_method} method"
+                            )
+                            st.info(
+                                f"Total points increased from {original_ccs_points * original_trapcv_points} to "
+                                f"{len(ccs_values) * len(trap_cv_values)}"
+                            )
                         except Exception as interp_error:
                             st.error(f"Interpolation failed: {str(interp_error)}")
                             st.info("Using original data without interpolation")
                             intensity_matrix_final = intensity_matrix_original
-                            
                     else:
                         intensity_matrix_final = intensity_matrix_original
                     
                     # Apply smoothing if requested
                     if apply_smoothing:
                         if smoothing_method == "Gaussian":
-                            intensity_matrix_final = ndimage.gaussian_filter(
-                                intensity_matrix_final, 
-                                sigma=gaussian_sigma,
-                                truncate=gaussian_truncate
+                            intensity_matrix_final = smooth_matrix_gaussian(
+                                intensity_matrix_final, sigma=gaussian_sigma, truncate=gaussian_truncate
                             )
-                            st.info(f"Applied Gaussian smoothing (σ={gaussian_sigma}, truncate={gaussian_truncate})")
-                        
+                            st.info(
+                                f"Applied Gaussian smoothing (σ={gaussian_sigma}, truncate={gaussian_truncate})"
+                            )
                         elif smoothing_method == "Savitzky-Golay":
-                            # Apply Savitzky-Golay filter to each row and column
-                            # First apply to rows (TrapCV direction)
-                            for i in range(intensity_matrix_final.shape[0]):
-                                if intensity_matrix_final.shape[1] >= sg_window_length:
-                                    intensity_matrix_final[i, :] = savgol_filter(
-                                        intensity_matrix_final[i, :], 
-                                        sg_window_length, 
-                                        sg_polyorder,
-                                        mode=sg_mode
-                                    )
-                            
-                            # Then apply to columns (CCS direction)
-                            for j in range(intensity_matrix_final.shape[1]):
-                                if intensity_matrix_final.shape[0] >= sg_window_length:
-                                    intensity_matrix_final[:, j] = savgol_filter(
-                                        intensity_matrix_final[:, j], 
-                                        sg_window_length, 
-                                        sg_polyorder,
-                                        mode=sg_mode
-                                    )
-                            
-                            st.info(f"Applied Savitzky-Golay smoothing (window={sg_window_length}, poly_order={sg_polyorder}, mode={sg_mode})")
+                            intensity_matrix_final = smooth_matrix_savgol(
+                                intensity_matrix_final,
+                                window_length=sg_window_length,
+                                polyorder=sg_polyorder,
+                                mode=sg_mode,
+                            )
+                            st.info(
+                                f"Applied Savitzky-Golay smoothing (window={sg_window_length}, "
+                                f"poly_order={sg_polyorder}, mode={sg_mode})"
+                            )
                     
                     # Prepare color scheme
                     if use_custom_color:
