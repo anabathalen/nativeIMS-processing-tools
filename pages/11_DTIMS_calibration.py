@@ -175,8 +175,23 @@ def calculate_true_voltage(
     transfer_dc_entrance: float, 
     helium_exit_dc: float
 ) -> float:
-    """Calculate true voltage from experimental parameters"""
-    return (helium_cell_dc + bias) - (transfer_dc_entrance + helium_exit_dc)
+    """
+    Calculate true voltage from experimental parameters.
+    
+    Formula: True Voltage = |bigger - smaller| - (|helium_exit_dc| + |transfer_dc_entrance|)
+    
+    Where:
+    - bigger - smaller = voltage difference between the two file-specific parameters
+    - Both helium_exit_dc and transfer_dc_entrance are made positive before subtraction
+    """
+    # Set voltage: bigger number minus smaller number (file-specific parameters)
+    set_voltage = abs(helium_cell_dc - bias)
+    
+    # Sum of exit voltages (both made positive)
+    exit_sum = abs(helium_exit_dc) + abs(transfer_dc_entrance)
+    
+    # True voltage
+    return set_voltage - exit_sum
 
 def perform_linear_regression(x_data: np.ndarray, y_data: np.ndarray) -> Dict[str, float]:
     """Linear regression: y vs x"""
@@ -193,29 +208,33 @@ def perform_linear_regression(x_data: np.ndarray, y_data: np.ndarray) -> Dict[st
 
 def create_calibration_plot(valid_data: pd.DataFrame, regression_results: Dict[str, float]) -> plt.Figure:
     """
-    Plot: x = Drift Time (ms), y = 1/Voltage (V⁻¹)
-    Regression performed on (Drift Time -> 1/Voltage)
+    Standard DTIMS calibration plot: td (x-axis) vs 1/V (y-axis)
+    
+    Expected linear relationship: 1/V = m·td + c
+    where m = K₀/L² and c is related to t₀
+    
+    This is the standard method for DTIMS calibration.
     """
     fig, ax = plt.subplots(figsize=(8, 6))
 
-    # Scatter
+    # Scatter plot of experimental data
     ax.scatter(valid_data['Max_Drift_Time'],
                valid_data['Voltage_Inverse'],
                color='blue', s=100, alpha=0.75, edgecolors='black', linewidth=0.5,
-               label='Data Points')
+               label='Experimental Data')
 
-    # Fit line
+    # Linear fit line
     x_line = np.linspace(valid_data['Max_Drift_Time'].min(),
                          valid_data['Max_Drift_Time'].max(), 200)
     y_line = regression_results['gradient'] * x_line + regression_results['intercept']
     ax.plot(x_line, y_line, 'r-', lw=2,
-            label=f'Fit: y = {regression_results["gradient"]:.6g}x + {regression_results["intercept"]:.6g}')
+            label=f'Linear Fit: 1/V = {regression_results["gradient"]:.6g}·td + {regression_results["intercept"]:.6g}')
 
-    ax.set_xlabel('Drift Time (ms)')
-    ax.set_ylabel('1 / Voltage (V⁻¹)')
-    ax.set_title(f'Calibration: 1/V vs Drift Time (R² = {regression_results["r2"]:.6f})')
+    ax.set_xlabel('Drift Time, td (ms)', fontsize=12)
+    ax.set_ylabel('1 / Voltage (V⁻¹)', fontsize=12)
+    ax.set_title(f'DTIMS Calibration: td vs 1/V (R² = {regression_results["r2"]:.6f})', fontsize=14, fontweight='bold')
     ax.grid(True, alpha=0.3)
-    ax.legend()
+    ax.legend(loc='best')
     plt.tight_layout()
     return fig
 
@@ -404,7 +423,9 @@ if st.session_state.data_uploaded:
         valid_data = results_df.dropna(subset=['Voltage_Inverse', 'Max_Drift_Time'])
 
         if len(valid_data) >= 2:
-            # NOTE: Regression now: y = 1/V, x = Drift Time
+            # Linear regression: td vs 1/V (standard DTIMS calibration method)
+            # y = 1/V, x = Drift Time
+            # Expected relationship: td = (L²/K₀)(1/V) + t₀
             regression_results = perform_linear_regression(
                 valid_data['Max_Drift_Time'].values,
                 valid_data['Voltage_Inverse'].values
@@ -570,61 +591,75 @@ with st.expander("How to use this tool"):
     4. **Set file-specific parameters** - For each raw file, enter the Helium Cell DC and Bias values
     5. **Enter analyte mass** - Required for CCS calculations
     6. **Process the data** - The tool will:
-       - Find the drift time with maximum intensity for each file (for calibration plot)
-       - Calculate the true voltage: (Helium Cell DC + Bias) - (Transfer DC Entrance + Helium Exit DC)
-       - Show both td vs 1/V (traditional) and td vs V (direct) relationships
-       - Calculate CCS for ALL drift times using the corrected Mason-Schamp equation
-       - Generate a downloadable CSV with complete calibrated data
+       - Find the drift time with maximum intensity for each file (apex points)
+       - Calculate the true voltage: |bigger - smaller| - (|helium_exit_dc| + |transfer_dc_entrance|)
+       - Plot the standard DTIMS calibration: td vs 1/V (linear relationship)
+       - Calculate CCS for apex points and the full dataset using the Mason-Schamp equation
+       - Generate downloadable CSV files with complete calibrated data
     """)
 
 with st.expander("About the calculations"):
     st.markdown("""
     **True Voltage Calculation:**
     ```
-    True Voltage = (Helium Cell DC + Bias) - (Transfer DC Entrance + Helium Exit DC)
+    Set Voltage = |Helium Cell DC - Bias|  (bigger - smaller)
+    Exit Sum = |Helium Exit DC| + |Transfer DC Entrance|
+    True Voltage = Set Voltage - Exit Sum
     ```
     
-    **Corrected Mason-Schamp CCS Calculation:**
+    **Mason-Schamp CCS Calculation:**
     ```
-    CCS = (3 * e * z)/(16 * N) * sqrt(2 * π * μ * k_B * T) * (1 / K)
+    CCS (Ω) = (3·z·e)/(16·N·K) × sqrt(2π/(μ·kB·T))
     ```
     
     Where:
-    - `e` = elementary charge (1.602 × 10⁻¹⁹ C)
-    - `z` = charge state
-    - `N` = number density of buffer gas = P/(kT)
-    - `μ` = reduced mass of analyte-buffer gas system
-    - `k` = Boltzmann constant (1.381 × 10⁻²³ J/K)
-    - `T` = temperature (K)
-    - `K` = mobility = L²/(V×td) [corrected formula]
-    - `L` = drift tube length (25.05 cm for Synapt)
-    
-    **Key Correction:**
-    - Mobility: K₀ = L²/(V×td) instead of L/(V×td)
-    - This ensures the proper linear relationship: td ∝ V
+    - `z` = charge state (integer)
+    - `e` = elementary charge (1.602176634 × 10⁻¹⁹ C)
+    - `N` = number density of buffer gas = P/(kB·T) [particles/m³]
+    - `K` = mobility = L²/(V·td) [m²/(V·s)]
+    - `μ` = reduced mass of ion-buffer system [kg]
+    - `kB` = Boltzmann constant (1.380649 × 10⁻²³ J/K)
+    - `T` = temperature [K]
+    - `P` = pressure [Pa]
+    - `L` = drift tube length (25.05 cm for Synapt G2)
+    - `V` = voltage [V]
+    - `td` = drift time [s]
     
     **Reduced Mass Calculation:**
     ```
-    μ = (m_analyte × m_buffer) / (m_analyte + m_buffer)
+    μ = (m_ion × m_buffer) / (m_ion + m_buffer)
     ```
+    (masses in kg)
     
     **Supported Buffer Gases:**
     - Helium (He): 4.002602 Da
     - Nitrogen (N₂): 28.014 Da
+    
+    **Important Notes:**
+    - The mobility formula K = L²/(V·td) is the correct form
+    - This gives the expected linear relationship: td ∝ 1/V
+    - CCS is reported in Ų (square Angstroms)
     """)
 
 with st.expander("Linear Relationships"):
     st.markdown("""
-    **Expected Linear Relationships:**
+    **DTIMS Calibration Theory:**
     
-    1. **td vs 1/V (Traditional Calibration):**
-       - From the relationship: td = (L²/K₀) × (1/V) + t₀
-       - Should give a straight line when plotting td vs 1/V
-       - Slope = L²/K₀, Intercept = t₀
+    The standard DTIMS calibration uses the **td vs 1/V** relationship:
     
-    2. **td vs V (Direct Relationship):**
-       - For constant mobility: td ∝ 1/V, so td vs V should be approximately linear for small voltage ranges
-       - Useful for verification of instrumental stability
+    From the mobility equation:
+    - K = L²/(V·td)  [corrected mobility formula]
+    - Rearranging: td = (L²/K)·(1/V)
     
-    The tool now shows both relationships to help verify your calibration.
+    **Expected Linear Relationship:**
+    - Plot: td (x-axis) vs 1/V (y-axis)
+    - Should give a straight line: 1/V = m·td + c
+    - Slope m = K₀/L² (related to reduced mobility)
+    - Intercept c is related to any dead time (t₀)
+    
+    **Why this method?**
+    - Standard approach in DTIMS calibration
+    - Directly validates the linear relationship between drift time and inverse voltage
+    - Slope provides information about ion mobility
+    - Good linearity (high R²) confirms proper experimental conditions
     """)
