@@ -2,36 +2,18 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-import seaborn as sns
-try:
-    from sklearn.linear_model import LinearRegression
-    from sklearn.metrics import r2_score
-except ImportError:
-    st.error("Please install scikit-learn: pip install scikit-learn")
-    st.stop()
+from scipy import stats
+from scipy.optimize import curve_fit
+from scipy.interpolate import interp1d
+import math
 import io
 from typing import Tuple, Optional, Dict, List
-from dataclasses import dataclass
 
 # Set page config
-st.set_page_config(page_title="DTIMS Data Calibration", layout="wide")
+st.set_page_config(page_title="SYNAPT G2 DTIMS Data Processing", layout="wide")
 
-# Buffer gas properties
-BUFFER_GASES = {
-    "Helium": {"mass": 4.002602, "symbol": "He"},  # Da
-    "Nitrogen": {"mass": 28.014, "symbol": "N₂"}   # Da
-}
-
-# Physical constants
-@dataclass
-class PhysicalConstants:
-    k_B: float = 1.380649e-23      # Boltzmann constant (J/K)
-    e: float = 1.602176634e-19     # Elementary charge (C)
-    N_A: float = 6.02214076e23     # Avogadro's number
-    da_to_kg: float = 1.66054e-27  # Dalton to kg conversion
-    pi: float = np.pi
-
-CONSTANTS = PhysicalConstants()
+# Set page config
+st.set_page_config(page_title="SYNAPT G2 DTIMS Data Processing", layout="wide")
 
 # Custom CSS for better styling
 st.markdown("""
@@ -65,205 +47,120 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown('<div class="main-header">DTIMS Data Calibration Tool</div>', unsafe_allow_html=True)
+st.markdown('<div class="main-header">SYNAPT G2 DTIMS Data Processing</div>', unsafe_allow_html=True)
 
-def parse_dtims_csv(file) -> Tuple[Optional[pd.DataFrame], Optional[List[str]], Optional[List[str]]]:
-    """Parse the DTIMS CSV file and extract data"""
-    try:
-        content = file.read().decode('utf-8')
-        lines = content.strip().split('\n')
-        
-        # Extract header information
-        range_files = lines[0].split(',')[1:]  # Skip first empty cell
-        raw_files = lines[1].split(',')[1:]   # Skip first empty cell
-        
-        # Parse data into DataFrame
-        data_rows = []
-        for line in lines[2:]:  # Skip first 2 header lines
-            values = line.split(',')
-            if len(values) >= 6:  # Ensure we have all columns
-                data_rows.append([float(v) if v else 0 for v in values])
-        
-        # Create DataFrame
-        columns = ['Time'] + [f'File_{i+1}' for i in range(len(raw_files))]
-        df = pd.DataFrame(data_rows, columns=columns)
-        
-        return df, raw_files, range_files
+# Helper functions from the notebook
+def get_arrival(get_scans, pusher):
+    """Convert scans to arrival time"""
+    scans = get_scans
+    arrival = []
+    pusher = pusher
+    for i in scans:
+        arrival.append(i*0.000001*pusher)
+    return arrival
+
+def normalise(a):
+    """Normalize intensity data"""
+    data_norm = []
+    for i in a:
+        data_norm.append(i/np.max(a))
+    return data_norm
+
+def get_scans(y):
+    """Generate scan numbers from data length"""
+    n = len(y)
+    scans = []
+    for i in range(n):
+        scans.append(i+1)
+    return scans
+
+def CCS(z, V, mass, td, t0, Tavg, Pavg):
+    """Calculate CCS for given drift time - SYNAPT G2 formula"""
+    # Define constants
+    e = 1.6E-19
+    T = Tavg
+    P = Pavg
+    L = 0.255  # Length in meters for SYNAPT G2
+    kb = 1.38E-23
+    pi = math.pi
+    m1 = mass
+    m2 = 6.64E-27  # Helium mass in kg
     
-    except Exception as e:
-        st.error(f"Error parsing CSV file: {str(e)}")
-        return None, None, None
+    # Calculate CCS for given drift time
+    top = 3*z*e*math.sqrt(2*pi*T*kb)*V*(td - t0)
+    bot = 16*P*(L**2)*math.sqrt((m1*m2)/(m1+m2))
+    ans = top/bot
+    scaled = ans*100000000000000000000  # Scale to Angstrom^2
+    return scaled
 
-def find_max_drift_time(df: pd.DataFrame, column: str) -> Tuple[Optional[float], Optional[float]]:
-    """Find the drift time with maximum intensity for a given column"""
-    if column in df.columns:
-        max_idx = df[column].idxmax()
-        return df.loc[max_idx, 'Time'], df.loc[max_idx, column]
-    return None, None
-
-def calculate_reduced_mass(mass_analyte: float, mass_buffer: float) -> float:
-    """Calculate reduced mass in kg"""
-    mass_analyte_kg = mass_analyte * CONSTANTS.da_to_kg
-    mass_buffer_kg = mass_buffer * CONSTANTS.da_to_kg
-    return (mass_analyte_kg * mass_buffer_kg) / (mass_analyte_kg + mass_buffer_kg)
-
-def calculate_ccs_mason_schamp(
-    drift_time: float, 
-    voltage: float, 
-    temperature: float, 
-    pressure: float, 
-    mass_analyte: float, 
-    mass_buffer: float,
-    charge: int = 1, 
-    length: float = 25.05,
-    return_mobility: bool = False
-) -> float | Tuple[float, float]:
-    """
-    Calculate CCS (Å²) using the Mason–Schamp equation (correct form).
+def plot_ATD(df, ax=None):
+    """Plot arrival time distribution"""
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(8, 5))
+    else:
+        fig = ax.get_figure()
     
-    Ω = (3 z e)/(16 N K) * sqrt( (2 π)/( μ k_B T ) )
+    # Take columns from data set
+    x = df['Arrival Time (ms)'].tolist()
+    y = df['Intensity'].tolist()
     
-    Where:
-      N = P / (k_B T)
-      K = L^2 / (V * t_d)
+    # Smooth the data
+    xnew = np.linspace(np.min(x), np.max(x), 1500)
+    f = interp1d(x, y)
+    y_smooth = f(xnew)
+    line, = ax.plot(xnew, y_smooth, 'r-')
     
-    Inputs:
-      drift_time : ms
-      voltage    : V
-      temperature: K
-      pressure   : mbar
-      length     : cm (drift region length)
+    # Find maximum
+    ymax = np.max(y)
+    xpos = y.index(ymax)
+    xmax = x[xpos]
+    time = xmax
     
-    Returns:
-      CCS in Å² (or (CCS, mobility) if return_mobility=True)
-    """
-    if (drift_time is None or voltage is None or
-        drift_time <= 0 or voltage <= 0 or
-        temperature <= 0 or pressure <= 0 or
-        mass_analyte <= 0 or mass_buffer <= 0):
-        return (np.nan, np.nan) if return_mobility else np.nan
-
-    # Unit conversions
-    t_s = drift_time * 1e-3          # ms -> s
-    L_m = length * 1e-2              # cm -> m
-    P_Pa = pressure * 100.0          # mbar -> Pa
-
-    # Reduced mass (kg)
-    mu = calculate_reduced_mass(mass_analyte, mass_buffer)
-
-    # Number density N (m^-3)
-    N = P_Pa / (CONSTANTS.k_B * temperature)
-
-    # Mobility (m^2 / (V·s))
-    K = (L_m * L_m) / (voltage * t_s)
-
-    if K <= 0 or not np.isfinite(K):
-        return (np.nan, np.nan) if return_mobility else np.nan
-
-    # Mason–Schamp (correct square root term)
-    prefactor = (3.0 * charge * CONSTANTS.e) / (16.0 * N * K)
-    sqrt_term = np.sqrt((2.0 * CONSTANTS.pi) / (mu * CONSTANTS.k_B * temperature))
-    ccs_m2 = prefactor * sqrt_term  # m^2
-
-    ccs_A2 = ccs_m2 * 1e20  # m^2 -> Å^2
-
-    return (ccs_A2, K) if return_mobility else ccs_A2
-
-def calculate_true_voltage(
-    helium_cell_dc: float, 
-    bias: float, 
-    transfer_dc_entrance: float, 
-    helium_exit_dc: float
-) -> float:
-    """
-    Calculate true voltage from experimental parameters.
+    # Add annotation
+    ax.annotate(s=round(xmax, 2), xy=(xmax, ymax), xytext=(xmax+0.5, ymax*0.9),
+                arrowprops=dict(facecolor='orange'))
     
-    Formula: True Voltage = |bigger - smaller| - (|helium_exit_dc| + |transfer_dc_entrance|)
+    ax.set_xlim(np.min(x), np.max(x))
+    ax.get_yaxis().set_visible(False)
+    ax.set_xlabel('Arrival time (ms)')
+    ax.set_title(df.name if hasattr(df, 'name') else 'ATD')
     
-    Where:
-    - bigger - smaller = voltage difference between the two file-specific parameters
-    - Both helium_exit_dc and transfer_dc_entrance are made positive before subtraction
-    """
-    # Set voltage: bigger number minus smaller number (file-specific parameters)
-    set_voltage = abs(helium_cell_dc - bias)
-    
-    # Sum of exit voltages (both made positive)
-    exit_sum = abs(helium_exit_dc) + abs(transfer_dc_entrance)
-    
-    # True voltage
-    return set_voltage - exit_sum
+    return time, fig
 
-def perform_linear_regression(x_data: np.ndarray, y_data: np.ndarray) -> Dict[str, float]:
-    """Linear regression: y vs x"""
-    reg = LinearRegression()
-    reg.fit(x_data.reshape(-1, 1), y_data)
-    y_pred = reg.predict(x_data.reshape(-1, 1))
-    r2 = r2_score(y_data, y_pred)
-    return {
-        'gradient': reg.coef_[0],   # slope (Δy / Δx)
-        'intercept': reg.intercept_,
-        'r2': r2,
-        'y_pred': y_pred
-    }
-
-def create_calibration_plot(valid_data: pd.DataFrame, regression_results: Dict[str, float]) -> plt.Figure:
-    """
-    Standard DTIMS calibration plot: td (x-axis) vs 1/V (y-axis)
+def plot_CCSD(df2, ax=None):
+    """Make plot of CCSD"""
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(8, 5))
+    else:
+        fig = ax.get_figure()
     
-    Expected linear relationship: 1/V = m·td + c
-    where m = K₀/L² and c is related to t₀
+    # Take columns from data set
+    x = df2.iloc[:, 1].tolist()
+    y = df2.iloc[:, 2].tolist()
     
-    This is the standard method for DTIMS calibration.
-    """
-    fig, ax = plt.subplots(figsize=(8, 6))
-
-    # Scatter plot of experimental data
-    ax.scatter(valid_data['Max_Drift_Time'],
-               valid_data['Voltage_Inverse'],
-               color='blue', s=100, alpha=0.75, edgecolors='black', linewidth=0.5,
-               label='Experimental Data')
-
-    # Linear fit line
-    x_line = np.linspace(valid_data['Max_Drift_Time'].min(),
-                         valid_data['Max_Drift_Time'].max(), 200)
-    y_line = regression_results['gradient'] * x_line + regression_results['intercept']
-    ax.plot(x_line, y_line, 'r-', lw=2,
-            label=f'Linear Fit: 1/V = {regression_results["gradient"]:.6g}·td + {regression_results["intercept"]:.6g}')
-
-    ax.set_xlabel('Drift Time, td (ms)', fontsize=12)
-    ax.set_ylabel('1 / Voltage (V⁻¹)', fontsize=12)
-    ax.set_title(f'DTIMS Calibration: td vs 1/V (R² = {regression_results["r2"]:.6f})', fontsize=14, fontweight='bold')
-    ax.grid(True, alpha=0.3)
-    ax.legend(loc='best')
-    plt.tight_layout()
-    return fig
-
-def create_ccs_voltage_plot(ccs_data: pd.DataFrame) -> plt.Figure:
-    """Create CCS vs Voltage plot"""
-    fig, ax = plt.subplots(figsize=(10, 6))
+    # Smooth the data
+    xnew = np.linspace(np.min(x), np.max(x), 1500)
+    f = interp1d(x, y)
+    y_smooth = f(xnew)
+    line, = ax.plot(xnew, y_smooth, 'r-')
     
-    ax.scatter(ccs_data['Voltage (V)'], ccs_data['CCS (Å²)'], 
-              color='red', s=100, alpha=0.8, edgecolors='black', linewidth=1)
+    # Find maximum
+    ymax = np.max(y)
+    xpos = y.index(ymax)
+    xmax = x[xpos]
+    apex = round(xmax, 2)
     
-    # Add connecting line
-    sorted_data = ccs_data.sort_values('Voltage (V)')
-    ax.plot(sorted_data['Voltage (V)'], sorted_data['CCS (Å²)'], 
-           'r--', alpha=0.6, linewidth=1)
+    # Add annotation
+    ax.annotate(s=apex, xy=(xmax, ymax), xytext=(xmax+100, ymax-0.1),
+                arrowprops=dict(facecolor='orange'))
     
-    ax.set_xlabel('Voltage (V)')
-    ax.set_ylabel('CCS (Å²)')
-    ax.set_title('CCS vs Voltage (Maximum Intensity Points)')
-    ax.grid(True, alpha=0.3)
+    ax.set_ylim(0)
+    ax.set_xlim(np.min(x), np.max(x))
+    ax.get_yaxis().set_visible(False)
+    ax.set_xlabel(u"CCS (\u212B\u00B2)")
+    ax.set_title(df2.name if hasattr(df2, 'name') else 'CCSD')
     
-    # Annotate points with file names
-    for _, row in ccs_data.iterrows():
-        ax.annotate(row['File'], 
-                   (row['Voltage (V)'], row['CCS (Å²)']),
-                   xytext=(5, 5), textcoords='offset points',
-                   fontsize=8, alpha=0.7)
-    
-    plt.tight_layout()
-    return fig
+    return apex, fig
 
 # Initialize session state
 session_defaults = {
@@ -438,13 +335,37 @@ if st.session_state.data_uploaded:
             }
 
             st.markdown('<div class="section-header">📊 Calibration Results</div>', unsafe_allow_html=True)
-            col1, col2, col3 = st.columns(3)
+            
+            # Calculate mobility from calibration slope
+            # Relationship: 1/V = (K/L²)·td + intercept
+            # So: K = slope × L²
+            # BUT: slope is in V⁻¹/ms, need to convert to V⁻¹/s first
+            length_cm = 25.05
+            length_m = length_cm * 1e-2
+            slope_V_per_ms = regression_results['gradient']  # V⁻¹/ms
+            slope_V_per_s = slope_V_per_ms * 1000.0  # V⁻¹/s (convert ms to s)
+            mobility_K = slope_V_per_s * (length_m ** 2)  # m²/(V·s)
+            
+            # Convert to reduced mobility K₀ (at standard conditions: 273.15 K, 101325 Pa)
+            # K₀ = K × (P/P₀) × (T₀/T)
+            T0 = 273.15  # K (standard temperature)
+            P0 = 101325.0  # Pa (standard pressure, 1 atm)
+            P_Pa = pressure * 100.0  # convert mbar to Pa
+            reduced_mobility_K0 = mobility_K * (P_Pa / P0) * (T0 / temperature)
+            
+            col1, col2, col3, col4 = st.columns(4)
             with col1:
-                st.metric("Slope (Δ(1/V)/Δt)", f"{regression_results['gradient']:.6g}")
+                st.metric("Slope (Δ(1/V)/Δt)", f"{regression_results['gradient']:.6g} V⁻¹/ms")
             with col2:
-                st.metric("Intercept", f"{regression_results['intercept']:.6g}")
+                st.metric("Intercept", f"{regression_results['intercept']:.6g} V⁻¹")
             with col3:
                 st.metric("R²", f"{regression_results['r2']:.6f}")
+            with col4:
+                st.metric("Reduced Mobility K₀", f"{reduced_mobility_K0:.6e} m²/(V·s)")
+
+            st.info(f"**Mobility from calibration**: K = slope × L² = ({slope_V_per_ms:.6g} V⁻¹/ms × 1000) × ({length_m:.4f} m)² = {mobility_K:.6e} m²/(V·s)\n\n" +
+                   f"**Reduced mobility**: K₀ = K × (P/P₀) × (T₀/T) = {mobility_K:.6e} × ({P_Pa}/{P0}) × ({T0}/{temperature}) = {reduced_mobility_K0:.6e} m²/(V·s)\n\n" +
+                   f"**For CCS calculation**: Using experimental K with experimental T and P (correct approach)")
 
             fig = create_calibration_plot(valid_data, regression_results)
             st.pyplot(fig)
@@ -455,67 +376,73 @@ if st.session_state.data_uploaded:
             # =========================
             # CCS CALCULATIONS SECTION
             # =========================
-            st.markdown('<div class="section-header">🧮 Apex CCS Values</div>', unsafe_allow_html=True)
+            st.markdown('<div class="section-header">🧮 CCS Calculation</div>', unsafe_allow_html=True)
+            st.info("**Important**: CCS is calculated using the experimental mobility K from the calibration, " +
+                   "combined with experimental temperature and pressure in the Mason-Schamp equation: Ω = (3ze)/(16NK) × sqrt(2π/(μk_BT))")
+            
             colA, colB = st.columns(2)
             with colA:
                 charge_state = st.number_input("Charge State", value=1, min_value=1)
             with colB:
-                st.info("Apex CCS uses each file's maximum intensity drift time and true voltage.")
+                st.metric("Using Mobility K", f"{mobility_K:.6e} m²/(V·s)")
+                st.caption(f"(K₀ = {reduced_mobility_K0:.6e} m²/(V·s) for reference)")
 
             buffer_mass = BUFFER_GASES[buffer_gas]['mass']
 
-            # Compute CCS for each apex (max drift time per file)
+            # Calculate CCS using the experimental mobility from calibration
+            # IMPORTANT: Use experimental T and P with experimental K
+            # This is the correct approach - don't mix reduced mobility with standard conditions
+            ccs_value = calculate_ccs_from_mobility(
+                mobility_K=mobility_K,  # Use experimental K, not K₀
+                temperature=temperature,  # Use experimental temperature
+                pressure=pressure,  # Use experimental pressure (in mbar)
+                mass_analyte=mass_analyte,
+                mass_buffer=buffer_mass,
+                charge=charge_state
+            )
+
+            st.markdown('<div class="results-box">', unsafe_allow_html=True)
+            st.markdown(f"### **Collision Cross Section (CCS)**")
+            st.markdown(f"# {ccs_value:.2f} Ų")
+            st.markdown('</div>', unsafe_allow_html=True)
+
+            # Show apex table with calculated CCS (same for all since using calibration K)
             apex_ccs_rows = []
             for _, row in results_df.iterrows():
-                td = row['Max_Drift_Time']
-                V = row['True_Voltage']
-                if np.isfinite(td) and V is not None and V > 0:
-                    apex_ccs = calculate_ccs_mason_schamp(
-                        drift_time=td,
-                        voltage=abs(V),
-                        temperature=temperature,
-                        pressure=pressure,
-                        mass_analyte=mass_analyte,
-                        mass_buffer=buffer_mass,
-                        charge=charge_state
-                    )
-                else:
-                    apex_ccs = np.nan
-
                 apex_ccs_rows.append({
                     'File': row['File'],
-                    'Max_Drift_Time (ms)': td,
-                    'True_Voltage (V)': V,
-                    '1/Voltage (V⁻¹)': (1.0 / V) if V not in (0, None) else np.nan,
+                    'Max_Drift_Time (ms)': row['Max_Drift_Time'],
+                    'True_Voltage (V)': row['True_Voltage'],
+                    '1/Voltage (V⁻¹)': row['Voltage_Inverse'],
                     'Apex_Intensity': row['Max_Intensity'],
                     'Helium_Cell_DC': row['Helium_Cell_DC'],
                     'Bias': row['Bias'],
                     'Charge': charge_state,
-                    'Apex_CCS (Å²)': apex_ccs
+                    'CCS (Å²)': ccs_value  # Same CCS for all - from calibration
                 })
 
             apex_ccs_df = pd.DataFrame(apex_ccs_rows)
+            st.markdown("### Calibration Data with CCS")
             st.dataframe(apex_ccs_df, use_container_width=True)
 
             # Download apex CCS table
             apex_csv = apex_ccs_df.to_csv(index=False)
             st.download_button(
-                "📥 Download Apex CCS Table (CSV)",
+                "📥 Download Calibration Data with CCS (CSV)",
                 data=apex_csv,
-                file_name=f"dtims_apex_ccs_{buffer_gas.lower()}.csv",
+                file_name=f"dtims_calibration_ccs_{buffer_gas.lower()}.csv",
                 mime="text/csv"
             )
 
             # =========================
-            # FULL DATASET CCS
+            # FULL DATASET - Apply CCS to all drift times
             # =========================
-            st.markdown('<div class="section-header">📈 Full Dataset CCS Conversion</div>', unsafe_allow_html=True)
-            st.caption("All drift times for every file converted to CCS (long format).")
+            st.markdown('<div class="section-header">📈 Full Dataset with CCS</div>', unsafe_allow_html=True)
+            st.caption(f"All drift times for every file. CCS = {ccs_value:.2f} Ų (same for all, from calibration mobility).")
 
             all_ccs_data = []
-            skipped_ccs = 0
 
-            # Iterate each file (column) and compute CCS for every non-zero intensity drift time
+            # Iterate each file (column) and add CCS column (same value for all)
             for file_col, params in file_params.items():
                 file_signal = st.session_state.df[['Time', file_col]].copy()
                 file_signal = file_signal[file_signal[file_col] > 0]  # keep positive intensities
@@ -527,28 +454,11 @@ if st.session_state.data_uploaded:
                     transfer_dc_entrance, helium_exit_dc
                 )
 
-                if true_voltage is None or true_voltage <= 0:
-                    skipped_ccs += len(file_signal)
-                    continue
-
-                inv_voltage = 1.0 / true_voltage if true_voltage != 0 else np.nan
+                inv_voltage = 1.0 / true_voltage if (true_voltage and true_voltage != 0) else np.nan
 
                 for _, r in file_signal.iterrows():
                     td = r['Time']
                     intensity = r[file_col]
-
-                    if td <= 0:
-                        ccs_val = np.nan
-                    else:
-                        ccs_val = calculate_ccs_mason_schamp(
-                            drift_time=td,
-                            voltage=abs(true_voltage),
-                            temperature=temperature,
-                            pressure=pressure,
-                            mass_analyte=mass_analyte,
-                            mass_buffer=buffer_mass,
-                            charge=charge_state
-                        )
 
                     all_ccs_data.append({
                         'File': params['raw_file'],
@@ -559,25 +469,22 @@ if st.session_state.data_uploaded:
                         'Helium_Cell_DC': params['helium_cell_dc'],
                         'Bias': params['bias'],
                         'Charge': charge_state,
-                        'CCS (Å²)': ccs_val
+                        'CCS (Å²)': ccs_value  # Same CCS for all - from calibration
                     })
-
-            if skipped_ccs > 0:
-                st.warning(f"Skipped {skipped_ccs} drift points (non-positive true voltage).")
 
             full_ccs_df = pd.DataFrame(all_ccs_data)
 
             if full_ccs_df.empty:
-                st.error("No CCS values computed (check voltages and intensities).")
+                st.error("No data to display.")
             else:
                 st.dataframe(full_ccs_df, use_container_width=True, height=400)
 
                 # Download full CCS dataset
                 full_csv = full_ccs_df.to_csv(index=False)
                 st.download_button(
-                    "📥 Download Full CCS Dataset (CSV)",
+                    "📥 Download Full Dataset with CCS (CSV)",
                     data=full_csv,
-                    file_name=f"dtims_full_ccs_{buffer_gas.lower()}.csv",
+                    file_name=f"dtims_full_data_ccs_{buffer_gas.lower()}.csv",
                     mime="text/csv"
                 )
 # Information section
@@ -592,7 +499,7 @@ with st.expander("How to use this tool"):
     5. **Enter analyte mass** - Required for CCS calculations
     6. **Process the data** - The tool will:
        - Find the drift time with maximum intensity for each file (apex points)
-       - Calculate the true voltage: |bigger - smaller| - (|helium_exit_dc| + |transfer_dc_entrance|)
+       - Calculate the true voltage: (Helium Cell DC + Bias) - (|helium_exit_dc| + |transfer_dc_entrance|)
        - Plot the standard DTIMS calibration: td vs 1/V (linear relationship)
        - Calculate CCS for apex points and the full dataset using the Mason-Schamp equation
        - Generate downloadable CSV files with complete calibrated data
@@ -602,7 +509,7 @@ with st.expander("About the calculations"):
     st.markdown("""
     **True Voltage Calculation:**
     ```
-    Set Voltage = |Helium Cell DC - Bias|  (bigger - smaller)
+    Set Voltage = Helium Cell DC + Bias
     Exit Sum = |Helium Exit DC| + |Transfer DC Entrance|
     True Voltage = Set Voltage - Exit Sum
     ```
@@ -610,20 +517,23 @@ with st.expander("About the calculations"):
     **Mason-Schamp CCS Calculation:**
     ```
     CCS (Ω) = (3·z·e)/(16·N·K) × sqrt(2π/(μ·kB·T))
+    
+    Where:
+    - N = P/(kB·T) is the number density at experimental conditions
+    - K is the mobility from calibration at experimental conditions
     ```
     
     Where:
     - `z` = charge state (integer)
     - `e` = elementary charge (1.602176634 × 10⁻¹⁹ C)
     - `N` = number density of buffer gas = P/(kB·T) [particles/m³]
-    - `K` = mobility = L²/(V·td) [m²/(V·s)]
+    - `K` = mobility from calibration = (slope × L²) [m²/(V·s)]
     - `μ` = reduced mass of ion-buffer system [kg]
     - `kB` = Boltzmann constant (1.380649 × 10⁻²³ J/K)
-    - `T` = temperature [K]
-    - `P` = pressure [Pa]
+    - `T` = experimental temperature [K]
+    - `P` = experimental pressure [Pa]
     - `L` = drift tube length (25.05 cm for Synapt G2)
-    - `V` = voltage [V]
-    - `td` = drift time [s]
+    - slope = gradient from calibration plot (V⁻¹/s)
     
     **Reduced Mass Calculation:**
     ```
@@ -636,8 +546,9 @@ with st.expander("About the calculations"):
     - Nitrogen (N₂): 28.014 Da
     
     **Important Notes:**
-    - The mobility formula K = L²/(V·td) is the correct form
-    - This gives the expected linear relationship: td ∝ 1/V
+    - The calibration yields mobility K at experimental T and P
+    - This K is used directly in Mason-Schamp equation with experimental T and P
+    - The reduced mobility K₀ is calculated for reference/comparison purposes
     - CCS is reported in Ų (square Angstroms)
     """)
 
@@ -654,8 +565,9 @@ with st.expander("Linear Relationships"):
     **Expected Linear Relationship:**
     - Plot: td (x-axis) vs 1/V (y-axis)
     - Should give a straight line: 1/V = m·td + c
-    - Slope m = K₀/L² (related to reduced mobility)
+    - Slope m = K/L² (experimental mobility divided by length squared)
     - Intercept c is related to any dead time (t₀)
+    - From slope: K = m × L² (mobility at experimental conditions)
     
     **Why this method?**
     - Standard approach in DTIMS calibration

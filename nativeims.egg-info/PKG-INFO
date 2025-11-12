@@ -1,0 +1,68 @@
+Metadata-Version: 2.4
+Name: nativeims
+Version: 0.1.0
+Summary: A Python library for native ion mobility mass spectrometry data processing
+Home-page: https://github.com/yourusername/nativeIMS-processing-tools
+Author: Your Name
+Author-email: Your Name <your.email@example.com>
+License: MIT
+Project-URL: Homepage, https://github.com/yourusername/nativeIMS-processing-tools
+Project-URL: Documentation, https://github.com/yourusername/nativeIMS-processing-tools/blob/main/README.md
+Project-URL: Repository, https://github.com/yourusername/nativeIMS-processing-tools
+Project-URL: Bug Tracker, https://github.com/yourusername/nativeIMS-processing-tools/issues
+Keywords: mass-spectrometry,ion-mobility,proteomics,calibration
+Classifier: Development Status :: 3 - Alpha
+Classifier: Intended Audience :: Science/Research
+Classifier: Topic :: Scientific/Engineering :: Chemistry
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.7
+Classifier: Programming Language :: Python :: 3.8
+Classifier: Programming Language :: Python :: 3.9
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Classifier: Programming Language :: Python :: 3.13
+Requires-Python: >=3.7
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: pandas>=1.0.0
+Requires-Dist: numpy>=1.18.0
+Requires-Dist: scipy>=1.4.0
+Requires-Dist: matplotlib>=3.1.0
+Provides-Extra: web
+Requires-Dist: streamlit>=1.0.0; extra == "web"
+Provides-Extra: dev
+Requires-Dist: pytest>=6.0.0; extra == "dev"
+Requires-Dist: pytest-cov>=2.0.0; extra == "dev"
+Requires-Dist: black>=20.0.0; extra == "dev"
+Requires-Dist: flake8>=3.8.0; extra == "dev"
+Provides-Extra: all
+Requires-Dist: streamlit>=1.0.0; extra == "all"
+Requires-Dist: pytest>=6.0.0; extra == "all"
+Requires-Dist: pytest-cov>=2.0.0; extra == "all"
+Requires-Dist: black>=20.0.0; extra == "all"
+Requires-Dist: flake8>=3.8.0; extra == "all"
+Dynamic: author
+Dynamic: home-page
+Dynamic: license-file
+Dynamic: requires-python
+
+# 💻 Native IMS Processing Tools
+
+This repository is intended for use as a **Streamlit application**.  
+You can access the web version via **[LINK](#)**, or you can run the application locally.
+
+---
+
+## ⚠️ THIS APPLICATION IS A WORK IN PROGRESS ⚠️
+
+---
+
+The application contains a set of tools we use to process native ion mobility-mass spectrometry data. You will find tools for:
+
+- producing pretty mass spectra  
+- extracting data manually or using **TWIMExtract**  
+- generating input and calibration files for **IMSCal**  
+- processing and visualising calibrated data
+- much much more!

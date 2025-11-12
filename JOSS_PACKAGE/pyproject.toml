@@ -1,0 +1,103 @@
+[build-system]
+requires = ["setuptools>=45", "wheel", "setuptools_scm>=6.2"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "imspartacus"
+version = "1.0.0"
+description = "Ion Mobility Spectrometry Processing And Robust Toolkit for Analysis of Collision Cross Sections"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [
+    {name = "Your Name", email = "your.email@example.com"}
+]
+maintainers = [
+    {name = "Your Name", email = "your.email@example.com"}
+]
+keywords = [
+    "mass-spectrometry",
+    "ion-mobility",
+    "proteomics",
+    "calibration",
+    "CCS",
+    "TWIMS",
+    "collision-cross-section"
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Chemistry",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: OS Independent",
+]
+
+dependencies = [
+    "pandas>=1.3.0",
+    "numpy>=1.20.0",
+    "scipy>=1.7.0",
+    "matplotlib>=3.4.0",
+    "plotly>=5.0.0",
+    "streamlit>=1.20.0",
+    "scikit-learn>=0.24.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=3.0.0",
+    "black>=22.0.0",
+    "flake8>=4.0.0",
+    "sphinx>=4.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/yourusername/imspartacus"
+Documentation = "https://github.com/yourusername/imspartacus#readme"
+Repository = "https://github.com/yourusername/imspartacus"
+"Bug Tracker" = "https://github.com/yourusername/imspartacus/issues"
+
+[project.scripts]
+imspartacus = "app:main"
+
+[tool.setuptools]
+packages = ["imspartacus", "imspartacus.calibration", "imspartacus.extraction", 
+            "imspartacus.fitting", "imspartacus.io", "imspartacus.processing", 
+            "imspartacus.visualization", "myutils"]
+
+[tool.setuptools.package-data]
+"*" = ["*.csv", "*.txt", "*.md"]
+"static" = ["*.css"]
+
+[tool.black]
+line-length = 100
+target-version = ['py38', 'py39', 'py310', 'py311']
+include = '\.pyi?$'
+exclude = '''
+/(
+    \.eggs
+  | \.git
+  | \.hg
+  | \.mypy_cache
+  | \.tox
+  | \.venv
+  | _build
+  | buck-out
+  | build
+  | dist
+)/
+'''
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+python_classes = "Test*"
+python_functions = "test_*"
+addopts = "-v --cov=imspartacus --cov-report=html --cov-report=term"

@@ -1,0 +1,75 @@
+# Modern Python packaging configuration
+# This is the new standard way to configure Python packages
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nativeims"
+version = "0.1.0"
+description = "A Python library for native ion mobility mass spectrometry data processing"
+readme = "README.md"
+requires-python = ">=3.7"
+license = {text = "MIT"}
+authors = [
+    {name = "Your Name", email = "your.email@example.com"}
+]
+keywords = ["mass-spectrometry", "ion-mobility", "proteomics", "calibration"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Chemistry",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.7",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+
+# Core dependencies
+dependencies = [
+    "pandas>=1.0.0",
+    "numpy>=1.18.0",
+    "scipy>=1.4.0",
+    "matplotlib>=3.1.0",
+]
+
+[project.optional-dependencies]
+# Install with: pip install .[web]
+web = [
+    "streamlit>=1.0.0",
+]
+
+# Install with: pip install .[dev]
+dev = [
+    "pytest>=6.0.0",
+    "pytest-cov>=2.0.0",
+    "black>=20.0.0",
+    "flake8>=3.8.0",
+]
+
+# Install everything: pip install .[all]
+all = [
+    "streamlit>=1.0.0",
+    "pytest>=6.0.0",
+    "pytest-cov>=2.0.0",
+    "black>=20.0.0",
+    "flake8>=3.8.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/yourusername/nativeIMS-processing-tools"
+Documentation = "https://github.com/yourusername/nativeIMS-processing-tools/blob/main/README.md"
+Repository = "https://github.com/yourusername/nativeIMS-processing-tools"
+"Bug Tracker" = "https://github.com/yourusername/nativeIMS-processing-tools/issues"
+
+[tool.setuptools]
+packages = ["nativeims", "nativeims.io", "nativeims.calibration", "nativeims.utils"]
+
+[tool.setuptools.package-data]
+"*" = ["*.csv", "*.txt", "*.md"]
